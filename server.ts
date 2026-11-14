@@ -117,12 +117,6 @@ function filterValidRowIds(ids: unknown, maxRow: number): number[] {
   return Array.from(unique).sort((a, b) => a - b);
 }
 
-function buildSourcePayload(sourceRows: SourceRow[]): string {
-  return sourceRows
-    .map((r) => `Row ${r.rowIndex}: ${JSON.stringify(r.rawFields)} | raw="${r.rawText}"`)
-    .join('\n');
-}
-
 const AI_CACHE_TTL_MS = 15 * 60 * 1000;
 const AI_CACHE_MAX_ENTRIES = 100;
 const aiResponseCache = new Map<string, { expiresAt: number; data: unknown }>();
@@ -225,6 +219,11 @@ const aiLimiter = createRateLimiter({
   windowMs: 60 * 1000,
   maxRequests: 30,
   keyPrefix: 'ai',
+});
+
+app.get('/api/health', (_req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ ok: true, service: 'vayu-ai', timestamp: new Date().toISOString() });
 });
 
 // Authentication & Session Endpoints
@@ -1061,8 +1060,16 @@ async function startServer() {
     app.use(vite.middlewares);
   } else {
     const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
+    app.use(
+      '/assets',
+      express.static(path.join(distPath, 'assets'), {
+        maxAge: '1y',
+        immutable: true,
+      })
+    );
+    app.use(express.static(distPath, { maxAge: '1h' }));
     app.get('*', (_req, res) => {
+      res.setHeader('Cache-Control', 'no-cache');
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }

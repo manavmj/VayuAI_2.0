@@ -155,6 +155,9 @@ export const LandingStep: React.FC<LandingStepProps> = ({
         <img
           src={HERO_CANOPY_IMAGE}
           alt="Sunlit green forest canopy representing clean breathable civic air"
+          width={1600}
+          height={900}
+          fetchPriority="high"
           decoding="async"
           className="absolute inset-0 h-full w-full object-cover object-center"
         />
@@ -408,6 +411,8 @@ export const LandingStep: React.FC<LandingStepProps> = ({
                 <img
                   src={card.image}
                   alt={card.alt}
+                  width={800}
+                  height={600}
                   loading="lazy"
                   decoding="async"
                   className="h-full w-full object-cover"

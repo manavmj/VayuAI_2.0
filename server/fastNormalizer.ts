@@ -77,7 +77,7 @@ export function normalizeTimestampToIso(raw: string | undefined): string | null 
   // Already ISO-like with timezone (e.g. 2026-11-14T07:15+05:30 or Z)
   if (/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2})?(Z|[+-]\d{2}:?\d{2})$/i.test(trimmed)) {
     const normalized = trimmed.replace(' ', 'T');
-    return /:\d{2}(Z|[+-])/.test(normalized)
+    return /T\d{2}:\d{2}:\d{2}/.test(normalized)
       ? normalized
       : normalized.replace(/(Z|[+-]\d{2}:?\d{2})$/, ':00$1');
   }

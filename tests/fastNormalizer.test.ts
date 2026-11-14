@@ -1,7 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyAiAuditCorrections, fastNormalizeSourceRows } from '../server/fastNormalizer.ts';
+import {
+  applyAiAuditCorrections,
+  fastNormalizeSourceRows,
+  normalizeTimestampToIso,
+} from '../server/fastNormalizer.ts';
 import { MESSY_TEST_FIXTURE, parseRawTextToSourceRows } from '../src/utils/parser.ts';
+
+test('normalizeTimestampToIso handles Indian DD/MM/YYYY, DD-MMM-YY AM/PM, ISO, and blank values', () => {
+  assert.equal(normalizeTimestampToIso('14/11/2026 06:30'), '2026-11-14T06:30:00+05:30');
+  assert.equal(normalizeTimestampToIso('14-Nov-26 02:15 PM'), '2026-11-14T14:15:00+05:30');
+  assert.equal(normalizeTimestampToIso('2026-11-14T07:15+05:30'), '2026-11-14T07:15:00+05:30');
+  assert.equal(normalizeTimestampToIso(''), null);
+  assert.equal(normalizeTimestampToIso('NA'), null);
+});
 
 test('fastNormalizeSourceRows normalizes 14-row MESSY_TEST_FIXTURE with zero ambiguous rows and zero imputation', () => {
   const parsed = parseRawTextToSourceRows(MESSY_TEST_FIXTURE);
@@ -27,6 +39,23 @@ test('fastNormalizeSourceRows normalizes 14-row MESSY_TEST_FIXTURE with zero amb
   const row12 = result.readings.find((r) => r.rowIndex === 12);
   assert.equal(row12?.status, 'anomaly');
   assert.equal(row12?.naqiSubIndex, null);
+});
+
+test('fastNormalizeSourceRows handles wide multi-pollutant tables and unstructured field logs', () => {
+  const wideCsv = `Timestamp,Station,PM2.5 (ug/m3),PM10 (ug/m3)\n2026-11-14 08:00,Station Alpha,95,-8`;
+  const wideParsed = parseRawTextToSourceRows(wideCsv);
+  const { result: wideNorm, ambiguousRows: wideAmb } = fastNormalizeSourceRows(wideParsed.rows);
+  assert.equal(wideAmb.length, 0);
+  assert.equal(wideNorm.anomalyCount, 1);
+  assert.equal(wideNorm.readings[0].pollutant, 'PM10');
+
+  const logText = `2026-11-14 09:00 station: Gate 2 PM2.5=155 ug/m3\nUnparseable sensor heartbeat ok`;
+  const logParsed = parseRawTextToSourceRows(logText);
+  const { result: logNorm, ambiguousRows: logAmb } = fastNormalizeSourceRows(logParsed.rows);
+  assert.equal(logNorm.readings[0].status, 'valid');
+  assert.equal(logNorm.readings[0].normalizedValue, 155);
+  assert.equal(logAmb.length, 1);
+  assert.equal(logAmb[0].rowIndex, 2);
 });
 
 test('applyAiAuditCorrections applies contextual anomaly flags while keeping deterministic counts and null gaps', () => {
