@@ -309,7 +309,7 @@ export const LandingStep: React.FC<LandingStepProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
           <div>
             <p className="text-xs font-semibold uppercase tracking-[0.04em] text-[#15803d]">
-              {isHi ? 'मुख्य जनरेटिव AI क्षमताएं' : 'How Vayu AI Works After Login'}
+              {isHi ? 'मुख्य जनरेटिव AI क्षमताएं' : 'How Vayu AI Works'}
             </p>
             <h2
               id="capabilities-heading"
@@ -393,8 +393,8 @@ export const LandingStep: React.FC<LandingStepProps> = ({
           </h2>
           <p className="mt-1 text-sm text-[#3f493f] max-w-[72ch]">
             {isHi
-              ? 'वार्ड अधिकारी, हाउसिंग सोसाइटी और स्कूल की शक्तियां अलग होती हैं। अपनी भूमिका के साथ लॉगिन करें।'
-              : 'A ward officer, housing society, and school each control different levers. Sign in under your role to ingest data and generate scoped plans.'}
+              ? 'वार्ड अधिकारी, हाउसिंग सोसाइटी और स्कूल की शक्तियां अलग होती हैं। तुरंत डेटा इनजेस्ट करें या अपनी भूमिका के साथ वैकल्पिक रूप से लॉगिन करें।'
+              : 'A ward officer, housing society, and school each control different levers. Ingest any dataset directly or sign in optionally under your role to generate scoped plans.'}
           </p>
         </div>
 

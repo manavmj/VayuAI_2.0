@@ -1,9 +1,14 @@
 import 'dotenv/config';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  applyAiAuditCorrections,
+  fastNormalizeSourceRows,
+  type AiRowAuditCorrection,
+} from './server/fastNormalizer.ts';
 import {
   authenticateAccount,
   clearFailedLogin,
@@ -118,20 +123,80 @@ function buildSourcePayload(sourceRows: SourceRow[]): string {
     .join('\n');
 }
 
-function compactReadingsForPrompt(readings: NormalizedReading[]) {
-  return readings.map((r) => ({
-    rowIndex: r.rowIndex,
-    timestampIso: r.timestampIso,
-    station: r.station,
-    pollutant: r.pollutant,
-    normalizedValue: r.normalizedValue,
-    normalizedUnit: r.normalizedUnit,
-    naqiSubIndex: r.naqiSubIndex,
-    naqiCategory: r.naqiCategory,
-    whoExceeded: r.whoExceeded,
-    status: r.status,
-    ...(r.issueNote ? { issueNote: r.issueNote } : {}),
-  }));
+const AI_CACHE_TTL_MS = 15 * 60 * 1000;
+const AI_CACHE_MAX_ENTRIES = 100;
+const aiResponseCache = new Map<string, { expiresAt: number; data: unknown }>();
+
+function makeCacheKey(route: string, payload: unknown): string {
+  return createHash('sha256').update(`${route}:${JSON.stringify(payload)}`).digest('hex');
+}
+
+function getCachedAiResponse<T>(key: string): T | null {
+  const hit = aiResponseCache.get(key);
+  if (!hit) return null;
+  if (Date.now() > hit.expiresAt) {
+    aiResponseCache.delete(key);
+    return null;
+  }
+  return hit.data as T;
+}
+
+function setCachedAiResponse(key: string, data: unknown): void {
+  if (aiResponseCache.size >= AI_CACHE_MAX_ENTRIES) {
+    const oldestKey = aiResponseCache.keys().next().value;
+    if (oldestKey) aiResponseCache.delete(oldestKey);
+  }
+  aiResponseCache.set(key, { expiresAt: Date.now() + AI_CACHE_TTL_MS, data });
+}
+
+function buildCompactEvidenceDigest(normalization: NormalizationResult) {
+  const allRows = normalization.readings.map(
+    (r) =>
+      `R${r.rowIndex}|${r.timestampIso || 'no-ts'}|${r.station}|${r.pollutant}=${r.normalizedValue ?? 'null'} ${r.normalizedUnit}|NAQI=${r.naqiSubIndex ?? 'na'}(${r.naqiCategory})|${r.status}${r.whoExceeded ? '|WHO!' : ''}${r.issueNote ? `|${r.issueNote.slice(0, 80)}` : ''}`
+  );
+
+  const anomalyRows = normalization.readings
+    .filter((r) => r.status === 'anomaly')
+    .map((r) => ({
+      rowIndex: r.rowIndex,
+      station: r.station,
+      pollutant: r.pollutant,
+      value: r.normalizedValue,
+      unit: r.normalizedUnit,
+      note: r.issueNote,
+    }));
+
+  const gapRows = normalization.readings
+    .filter((r) => r.status === 'missing')
+    .map((r) => r.rowIndex);
+
+  return {
+    title: normalization.datasetTitle,
+    rows: normalization.totalSourceRows,
+    valid: normalization.validCount,
+    gaps: normalization.gapCount,
+    anomalies: normalization.anomalyCount,
+    anomalyRows,
+    gapRows,
+    overallNaqi: normalization.overallNaqi,
+    overallCategory: normalization.overallCategory,
+    dominantPollutant: normalization.dominantPollutant,
+    confidence: normalization.overallConfidence,
+    stations: normalization.stationSummaries.map((s) => ({
+      station: s.station,
+      peakNaqi: s.peakNaqi,
+      peakCategory: s.peakCategory,
+      dominant: s.dominantPollutant,
+      whoExceedances: s.whoExceedanceCount,
+      citedRows: s.citedRows,
+    })),
+    issues: normalization.issues.map((i) => ({
+      severity: i.severity,
+      title: i.title,
+      affectedRows: i.affectedRows,
+    })),
+    allRows,
+  };
 }
 
 const ROLE_INSTRUCTIONS: Record<UserRole, string> = {
@@ -350,75 +415,53 @@ app.post('/api/normalize', aiLimiter, async (req, res) => {
       return;
     }
 
-    const maxRow = sourceRows.length;
-    const systemInstruction = `You are Vayu AI, a strict environmental data hygiene engine.
-Your job is to normalize messy air-quality records into Indian NAQI (CPCB) units and flag WHO 2021 guideline exceedances WITHOUT EVER HALLUCINATING OR INVENTING MISSING DATA.
+    const cacheKey = makeCacheKey('/api/normalize', { sourceRows, datasetTitle: datasetTitle || '' });
+    const cached = getCachedAiResponse<NormalizationResult>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
 
-Rules:
-1. Return exactly one NormalizedReading entry for EVERY source row (rowIndex 1..${maxRow}). Never invent extra rows or drop rows.
-2. Standard Target Units (Indian CPCB NAQI):
-   - PM2.5 -> µg/m³ (WHO 24h guideline: 15 µg/m³)
-   - PM10 -> µg/m³ (WHO 24h guideline: 45 µg/m³)
-   - NO2 -> µg/m³ (convert ppb * 1.88 or ppm * 1880 at 25C/1atm; WHO 24h guideline: 25 µg/m³)
-   - SO2 -> µg/m³ (convert ppb * 2.62 or ppm * 2620 at 25C/1atm; WHO 24h guideline: 40 µg/m³)
-   - CO -> mg/m³ (convert ppm * 1.145 at 25C/1atm; WHO 24h guideline: 4 mg/m³)
-   - O3 -> µg/m³ (convert ppb * 1.96 or ppm * 1960; WHO 8h peak: 100 µg/m³)
-   - Raw AQI -> keep unit as 'NAQI' if already an index.
-3. Timestamp normalization: Convert valid dates/times into ISO-8601 strings (+05:30 if local Indian time without timezone). If missing or unparseable, set timestampIso to null and log a hygiene issue.
-4. Missing or unparseable readings (e.g., NA, --, blank): Set status='missing', normalizedValue=null, naqiSubIndex=null, naqiCategory='Unavailable', whoExceeded=false. NEVER impute or guess numbers.
-5. Anomalies & suspicious spikes: Negative values, physically implausible jumps (e.g. >1000 µg/m³ sudden spike or negative reading), or calibration faults must be marked status='anomaly' with a clear issueNote. Compute CPCB NAQI sub-index only for valid readings (or mark Unavailable if invalid/negative).
-6. CPCB NAQI categories: 0-50 Good, 51-100 Satisfactory, 101-200 Moderate, 201-300 Poor, 301-400 Very Poor, 401-500 Severe.
-7. Every HygieneIssue and StationSummary MUST cite exact rowIndex numbers from 1..${maxRow}.`;
+    // 1. Fast deterministic pre-normalization (<5ms) for exact unit math, CPCB NAQI, and null gaps
+    const { result: fastResult } = fastNormalizeSourceRows(sourceRows, datasetTitle);
+    const maxRow = sourceRows.length;
+
+    // 2. Compact Gemini AI Hygiene & Anomaly Audit (~150-350 output tokens instead of re-emitting 150 rows)
+    const compactAuditInput = sourceRows
+      .map((src, i) => {
+        const pre = fastResult.readings[i];
+        return `R${src.rowIndex} | raw="${src.rawText.slice(0, 180)}" | parsed: ${pre.station}, ${pre.pollutant}=${pre.normalizedValue ?? 'null'} ${pre.normalizedUnit}, ts=${pre.timestampIso || 'null'}, status=${pre.status}${pre.issueNote ? `, note="${pre.issueNote.slice(0, 60)}"` : ''}`;
+      })
+      .join('\n');
+
+    const systemInstruction = `You are Vayu AI, an expert environmental data hygiene & anomaly auditor.
+Review ALL ${maxRow} rows (1..${maxRow}) together with their deterministic pre-parse output.
+Return ONLY a compact JSON diff (do NOT echo unchanged valid rows!):
+1. rowCorrections: Return an entry ONLY for rows that:
+   - Have an ANOMALY missed by fixed thresholds (e.g., sudden statistical spike compared to adjacent readings/stations, negative/zero stuck sensor fault, implausible jump, or raw text/notes indicating malfunction/calibration/diesel-test/spike/error). Mark status='anomaly' with a concise issueNote explaining why.
+   - Were unparsed ('Unknown' or missing value even though rawText contains a numeric reading). Extract station, pollutant, timestampIso, normalizedValue (ug/m3 for PM2.5/PM10/NO2/SO2/O3, mg/m3 for CO), and status.
+   NEVER invent or impute values for blank/NA/-- sensor dropouts—keep missing rows as status='missing' and normalizedValue=null.
+2. issues: Group all real gaps, anomalies/outliers, format issues, and unit conversions found across 1..${maxRow} with exact affectedRows.`;
 
     const responseSchema = {
       type: Type.OBJECT,
       properties: {
         datasetTitle: { type: Type.STRING },
-        overallConfidence: { type: Type.STRING, enum: ['High', 'Moderate', 'Low'] },
-        overallNaqi: { type: Type.NUMBER, nullable: true },
-        overallCategory: {
-          type: Type.STRING,
-          enum: ['Good', 'Satisfactory', 'Moderate', 'Poor', 'Very Poor', 'Severe', 'Unavailable'],
-        },
-        dominantPollutant: { type: Type.STRING },
-        readings: {
+        rowCorrections: {
           type: Type.ARRAY,
           items: {
             type: Type.OBJECT,
             properties: {
               rowIndex: { type: Type.INTEGER },
-              timestampIso: { type: Type.STRING, nullable: true },
-              station: { type: Type.STRING },
-              pollutant: { type: Type.STRING },
-              rawValue: { type: Type.STRING },
-              rawUnit: { type: Type.STRING },
-              normalizedValue: { type: Type.NUMBER, nullable: true },
-              normalizedUnit: { type: Type.STRING },
-              naqiSubIndex: { type: Type.INTEGER, nullable: true },
-              naqiCategory: {
-                type: Type.STRING,
-                enum: ['Good', 'Satisfactory', 'Moderate', 'Poor', 'Very Poor', 'Severe', 'Unavailable'],
-              },
-              whoExceeded: { type: Type.BOOLEAN },
-              whoGuideline: { type: Type.STRING },
               status: { type: Type.STRING, enum: ['valid', 'missing', 'anomaly'] },
-              conversionNote: { type: Type.STRING },
+              pollutant: { type: Type.STRING, nullable: true },
+              station: { type: Type.STRING, nullable: true },
+              timestampIso: { type: Type.STRING, nullable: true },
+              normalizedValue: { type: Type.NUMBER, nullable: true },
+              normalizedUnit: { type: Type.STRING, nullable: true },
               issueNote: { type: Type.STRING },
             },
-            required: [
-              'rowIndex',
-              'station',
-              'pollutant',
-              'rawValue',
-              'rawUnit',
-              'normalizedUnit',
-              'naqiCategory',
-              'whoExceeded',
-              'whoGuideline',
-              'status',
-              'conversionNote',
-              'issueNote',
-            ],
+            required: ['rowIndex', 'status', 'issueNote'],
           },
         },
         issues: {
@@ -436,127 +479,30 @@ Rules:
             required: ['id', 'severity', 'title', 'explanation', 'affectedRows', 'reliabilityImpact'],
           },
         },
-        stationSummaries: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              station: { type: Type.STRING },
-              peakNaqi: { type: Type.INTEGER, nullable: true },
-              peakCategory: {
-                type: Type.STRING,
-                enum: ['Good', 'Satisfactory', 'Moderate', 'Poor', 'Very Poor', 'Severe', 'Unavailable'],
-              },
-              dominantPollutant: { type: Type.STRING },
-              citedRows: { type: Type.ARRAY, items: { type: Type.INTEGER } },
-            },
-            required: ['station', 'peakCategory', 'dominantPollutant', 'citedRows'],
-          },
-        },
       },
-      required: [
-        'datasetTitle',
-        'overallConfidence',
-        'overallCategory',
-        'dominantPollutant',
-        'readings',
-        'issues',
-        'stationSummaries',
-      ],
+      required: ['datasetTitle', 'rowCorrections', 'issues'],
     };
 
-    const rawResult = await generateJsonWithRetry<Omit<NormalizationResult, 'totalSourceRows' | 'validCount' | 'gapCount' | 'anomalyCount'>>({
+    const audit = await generateJsonWithRetry<{
+      datasetTitle: string;
+      rowCorrections: AiRowAuditCorrection[];
+      issues: NormalizationResult['issues'];
+    }>({
       systemInstruction,
-      contents: `Dataset label: ${datasetTitle || 'Uploaded Monitoring Dataset'}\n\nSource Rows:\n${buildSourcePayload(sourceRows)}`,
+      contents: `Dataset label: ${datasetTitle || 'Uploaded Monitoring Dataset'}\n\nRows (${maxRow} total):\n${compactAuditInput}`,
       responseSchema,
-      thinkingLevel: ThinkingLevel.MEDIUM,
+      thinkingLevel: ThinkingLevel.LOW,
     });
 
-    // Deterministic verification against sourceRows
-    const readingsByRow = new Map<number, NormalizedReading>();
-    for (const r of rawResult.readings || []) {
-      const idx = Number(r.rowIndex);
-      if (Number.isInteger(idx) && idx >= 1 && idx <= maxRow) {
-        readingsByRow.set(idx, {
-          ...r,
-          rowIndex: idx,
-          timestampIso: r.timestampIso ?? null,
-          normalizedValue: typeof r.normalizedValue === 'number' ? r.normalizedValue : null,
-          naqiSubIndex: typeof r.naqiSubIndex === 'number' ? r.naqiSubIndex : null,
-        });
-      }
-    }
+    const auditedResult = applyAiAuditCorrections(
+      fastResult,
+      audit.rowCorrections || [],
+      audit.issues || [],
+      datasetTitle || audit.datasetTitle
+    );
 
-    const verifiedReadings: NormalizedReading[] = sourceRows.map((src) => {
-      const matched = readingsByRow.get(src.rowIndex);
-      if (matched) return matched;
-      return {
-        rowIndex: src.rowIndex,
-        timestampIso: null,
-        station: src.rawFields.Station_Zone || src.rawFields.Station || 'Unparsed Station',
-        pollutant: src.rawFields.Pollutant || 'Unknown',
-        rawValue: src.rawText,
-        rawUnit: '',
-        normalizedValue: null,
-        normalizedUnit: 'N/A',
-        naqiSubIndex: null,
-        naqiCategory: 'Unavailable',
-        whoExceeded: false,
-        whoGuideline: 'Not evaluated',
-        status: 'missing',
-        conversionNote: 'Row omitted during parsing',
-        issueNote: 'Flagged automatically because reading could not be verified.',
-      };
-    });
-
-    const validCount = verifiedReadings.filter((r) => r.status === 'valid').length;
-    const gapCount = verifiedReadings.filter((r) => r.status === 'missing').length;
-    const anomalyCount = verifiedReadings.filter((r) => r.status === 'anomaly').length;
-
-    const verifiedIssues = (rawResult.issues || [])
-      .map((issue, i) => ({
-        ...issue,
-        id: issue.id || `issue-${i + 1}`,
-        affectedRows: filterValidRowIds(issue.affectedRows, maxRow),
-      }))
-      .filter((issue) => issue.affectedRows.length > 0);
-
-    const verifiedStations = (rawResult.stationSummaries || []).map((st) => {
-      const stationRows = verifiedReadings.filter(
-        (r) => r.station.toLowerCase() === st.station.toLowerCase()
-      );
-      const fallbackIds = stationRows.map((r) => r.rowIndex);
-      const citedRows = filterValidRowIds(st.citedRows, maxRow);
-      return {
-        station: st.station,
-        readingCount: stationRows.length || citedRows.length,
-        validCount: stationRows.filter((r) => r.status === 'valid').length,
-        gapCount: stationRows.filter((r) => r.status === 'missing').length,
-        anomalyCount: stationRows.filter((r) => r.status === 'anomaly').length,
-        peakNaqi: typeof st.peakNaqi === 'number' ? st.peakNaqi : null,
-        peakCategory: st.peakCategory,
-        dominantPollutant: st.dominantPollutant,
-        whoExceedanceCount: stationRows.filter((r) => r.whoExceeded).length,
-        citedRows: citedRows.length > 0 ? citedRows : fallbackIds,
-      };
-    });
-
-    const normalized: NormalizationResult = {
-      datasetTitle: datasetTitle || rawResult.datasetTitle || 'Air Quality Monitoring Batch',
-      totalSourceRows: maxRow,
-      validCount,
-      gapCount,
-      anomalyCount,
-      overallConfidence: rawResult.overallConfidence,
-      overallNaqi: typeof rawResult.overallNaqi === 'number' ? rawResult.overallNaqi : null,
-      overallCategory: rawResult.overallCategory,
-      dominantPollutant: rawResult.dominantPollutant,
-      readings: verifiedReadings,
-      issues: verifiedIssues,
-      stationSummaries: verifiedStations,
-    };
-
-    res.json(normalized);
+    setCachedAiResponse(cacheKey, auditedResult);
+    res.json(auditedResult);
   } catch (error) {
     console.error('Normalize error:', error);
     const message = error instanceof Error ? error.message : 'Normalization failed.';
@@ -582,19 +528,35 @@ app.post('/api/brief', aiLimiter, async (req, res) => {
     const activeLang: AdvisoryLanguage = language || 'en';
     const activeLevel: ReadingLevel = readingLevel || 'standard';
     const maxRow = normalization.totalSourceRows;
+    const digest = buildCompactEvidenceDigest(normalization);
+    const cacheKey = makeCacheKey('/api/brief', {
+      digest,
+      role: activeRole,
+      language: activeLang,
+      readingLevel: activeLevel,
+    });
+    const cached = getCachedAiResponse<{
+      internalBriefing: InternalBriefing;
+      citizenAdvisory: CitizenAdvisory;
+    }>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
 
     const systemInstruction = `You are Vayu AI, generating grounded dual-output air-quality briefings strictly from verified sensor readings.
+Keep responses crisp and scannable for low latency: 3 keyFindings (1-2 sentences each), 3 actionPlan items (1-2 sentences each), and 3-4 concise generalActions.
 
 CRITICAL ANTI-HALLUCINATION RULES:
-1. Only reference stations, pollutants, timestamps, and values present in the provided normalized dataset.
+1. Only reference stations, pollutants, timestamps, and values present in the provided normalized digest.
 2. Every keyFinding, actionItem, and citizenAdvisory must cite valid rowIndex numbers from 1..${maxRow}.
-3. If there are missing readings or anomaly spikes, explicitly note them in reliabilityCaveat and NEVER treat anomalous/faulty spikes as confirmed ambient exposure without flagging them.
+3. Note any missing readings or anomaly spikes in reliabilityCaveat; NEVER treat anomalous spikes as confirmed ambient exposure.
 4. ROLE AUTHORITY CONSTRAINT:
 ${ROLE_INSTRUCTIONS[activeRole]}
 5. CITIZEN ADVISORY RULES:
 - Language: ${activeLang === 'hi' ? 'Hindi (natural, clear Devanagari script)' : 'English'}
-- Reading Level: ${activeLevel === 'simple' ? 'Simple / Elementary (short sentences, everyday words, zero technical jargon or chemical formulas where avoidable, easy for children and elders to follow)' : 'Standard (clear public-health notice with CPCB/WHO context)'}
-- Must explicitly include practical protective guidance for three vulnerable groups: children, older adults, and respiratory-sensitive individuals (asthma/COPD/heart conditions).`;
+- Reading Level: ${activeLevel === 'simple' ? 'Simple / Elementary (short sentences, everyday words, zero technical jargon)' : 'Standard (clear public-health notice with CPCB/WHO context)'}
+- Include brief practical guidance for children, older adults, and respiratory-sensitive individuals.`;
 
     const responseSchema = {
       type: Type.OBJECT,
@@ -663,18 +625,9 @@ ${ROLE_INSTRUCTIONS[activeRole]}
       citizenAdvisory: Omit<CitizenAdvisory, 'language' | 'readingLevel'>;
     }>({
       systemInstruction,
-      contents: `Verified Normalized Data Summary:\n${JSON.stringify({
-        datasetTitle: normalization.datasetTitle,
-        overallNaqi: normalization.overallNaqi,
-        overallCategory: normalization.overallCategory,
-        dominantPollutant: normalization.dominantPollutant,
-        overallConfidence: normalization.overallConfidence,
-        stationSummaries: normalization.stationSummaries,
-        issues: normalization.issues,
-        readings: compactReadingsForPrompt(normalization.readings),
-      })}`,
+      contents: `Verified Digest:\n${JSON.stringify(digest)}`,
       responseSchema,
-      thinkingLevel: ThinkingLevel.MEDIUM,
+      thinkingLevel: ThinkingLevel.LOW,
     });
 
     const sanitizedBriefing: InternalBriefing = {
@@ -696,10 +649,12 @@ ${ROLE_INSTRUCTIONS[activeRole]}
       citedRows: filterValidRowIds(result.citizenAdvisory.citedRows, maxRow),
     };
 
-    res.json({
+    const responsePayload = {
       internalBriefing: sanitizedBriefing,
       citizenAdvisory: sanitizedAdvisory,
-    });
+    };
+    setCachedAiResponse(cacheKey, responsePayload);
+    res.json(responsePayload);
   } catch (error) {
     console.error('Brief generation error:', error);
     const message = error instanceof Error ? error.message : 'Failed to generate briefings.';
@@ -724,12 +679,23 @@ app.post('/api/advisory', aiLimiter, async (req, res) => {
     const activeLang: AdvisoryLanguage = language || 'en';
     const activeLevel: ReadingLevel = readingLevel || 'standard';
     const maxRow = normalization.totalSourceRows;
+    const digest = buildCompactEvidenceDigest(normalization);
+    const cacheKey = makeCacheKey('/api/advisory', {
+      digest,
+      language: activeLang,
+      readingLevel: activeLevel,
+    });
+    const cached = getCachedAiResponse<CitizenAdvisory>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
 
-    const systemInstruction = `You are Vayu AI's public health communicator. Rewrite the Citizen Advisory strictly from the verified air-quality data below.
+    const systemInstruction = `You are Vayu AI's public health communicator. Rewrite the Citizen Advisory strictly from the verified air-quality digest below (3-4 concise generalActions, short clear sentences).
 Do NOT invent any new numbers, stations, or dates.
 Language: ${activeLang === 'hi' ? 'Hindi (clear, natural Devanagari script)' : 'English'}.
-Reading Level: ${activeLevel === 'simple' ? 'Simple / Elementary (short sentences, easy everyday words, Grade 4-5 readability, no chemical jargon)' : 'Standard (clear public health bulletin with CPCB/WHO context)'}.
-Include specific guidance for children, older adults, and respiratory-sensitive individuals, plus citedRows from 1..${maxRow}.`;
+Reading Level: ${activeLevel === 'simple' ? 'Simple / Elementary (short sentences, everyday words, Grade 4-5 readability, no chemical jargon)' : 'Standard (clear public health bulletin with CPCB/WHO context)'}.
+Include brief guidance for children, older adults, and respiratory-sensitive individuals, plus citedRows from 1..${maxRow}.`;
 
     const responseSchema = {
       type: Type.OBJECT,
@@ -755,32 +721,21 @@ Include specific guidance for children, older adults, and respiratory-sensitive 
     const result = await generateJsonWithRetry<Omit<CitizenAdvisory, 'language' | 'readingLevel'>>({
       systemInstruction,
       contents: JSON.stringify({
-        overallNaqi: normalization.overallNaqi,
-        overallCategory: normalization.overallCategory,
-        dominantPollutant: normalization.dominantPollutant,
-        stationSummaries: normalization.stationSummaries,
+        ...digest,
         reliabilityCaveat: internalBriefing?.reliabilityCaveat || '',
-        readings: normalization.readings.map((r) => ({
-          rowIndex: r.rowIndex,
-          station: r.station,
-          pollutant: r.pollutant,
-          normalizedValue: r.normalizedValue,
-          normalizedUnit: r.normalizedUnit,
-          naqiCategory: r.naqiCategory,
-          whoExceeded: r.whoExceeded,
-          status: r.status,
-        })),
       }),
       responseSchema,
       thinkingLevel: ThinkingLevel.LOW,
     });
 
-    res.json({
+    const responsePayload: CitizenAdvisory = {
       ...result,
       language: activeLang,
       readingLevel: activeLevel,
       citedRows: filterValidRowIds(result.citedRows, maxRow),
-    });
+    };
+    setCachedAiResponse(cacheKey, responsePayload);
+    res.json(responsePayload);
   } catch (error) {
     console.error('Advisory translation error:', error);
     const message = error instanceof Error ? error.message : 'Failed to update Citizen Advisory.';
@@ -806,12 +761,24 @@ app.post('/api/compare', aiLimiter, async (req, res) => {
     }
 
     const maxRow = currentNormalization.totalSourceRows;
+    const digest = buildCompactEvidenceDigest(currentNormalization);
+    const cacheKey = makeCacheKey('/api/compare', {
+      digest,
+      previousLabel: previousLabel || 'Prior Baseline',
+      previousContent: previousContent.slice(0, 6000),
+    });
+    const cached = getCachedAiResponse<ComparisonResult>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
     const systemInstruction = `You are Vayu AI's historical comparison analyst ("What Changed").
-Compare the CURRENT verified dataset against the PREVIOUS report/briefing.
+Compare the CURRENT verified digest against the PREVIOUS report/briefing concisely (max 4 stations per list, 1 crisp sentence per deltaNote).
 Rules:
-1. NEVER fabricate stations or readings that do not appear in either the previous report or current dataset.
-2. Categorize zones accurately into: worseningZones, improvingZones, or persistentHotspots. If a station only appears in one or has sensor dropouts preventing comparison, mention that honestly in dataQualityCaveat or mark insufficient_data.
-3. Every zone delta MUST cite valid rowIndex numbers (1..${maxRow}) from the CURRENT dataset where applicable.`;
+1. NEVER fabricate stations or readings that do not appear in either the previous report or current digest.
+2. Categorize zones accurately into: worseningZones, improvingZones, or persistentHotspots. Mention dropouts honestly in dataQualityCaveat.
+3. Every zone delta MUST cite valid rowIndex numbers (1..${maxRow}) from the CURRENT dataset.`;
 
     const responseSchema = {
       type: Type.OBJECT,
@@ -888,15 +855,9 @@ Rules:
 
     const result = await generateJsonWithRetry<ComparisonResult>({
       systemInstruction,
-      contents: `PREVIOUS BRIEF / REPORT (${previousLabel || 'Prior Baseline'}):\n${previousContent.slice(0, 12000)}\n\nCURRENT VERIFIED DATASET (${currentNormalization.datasetTitle}):\n${JSON.stringify({
-        overallNaqi: currentNormalization.overallNaqi,
-        overallCategory: currentNormalization.overallCategory,
-        stationSummaries: currentNormalization.stationSummaries,
-        issues: currentNormalization.issues,
-        readings: compactReadingsForPrompt(currentNormalization.readings),
-      })}`,
+      contents: `PREVIOUS REPORT (${previousLabel || 'Prior Baseline'}):\n${previousContent.slice(0, 6000)}\n\nCURRENT VERIFIED DIGEST:\n${JSON.stringify(digest)}`,
       responseSchema,
-      thinkingLevel: ThinkingLevel.MEDIUM,
+      thinkingLevel: ThinkingLevel.LOW,
     });
 
     const sanitizeDeltas = (list: ComparisonResult['worseningZones']) =>
@@ -905,14 +866,16 @@ Rules:
         citedRows: filterValidRowIds(item.citedRows, maxRow),
       }));
 
-    res.json({
+    const responsePayload: ComparisonResult = {
       ...result,
       baselineLabel: previousLabel || result.baselineLabel || 'Previous Report',
       currentLabel: currentNormalization.datasetTitle,
       worseningZones: sanitizeDeltas(result.worseningZones),
       improvingZones: sanitizeDeltas(result.improvingZones),
       persistentHotspots: sanitizeDeltas(result.persistentHotspots),
-    });
+    };
+    setCachedAiResponse(cacheKey, responsePayload);
+    res.json(responsePayload);
   } catch (error) {
     console.error('Compare error:', error);
     const message = error instanceof Error ? error.message : 'Failed to compare historical reports.';
@@ -932,11 +895,19 @@ app.post('/api/brief-all-roles', aiLimiter, async (req, res) => {
     }
 
     const maxRow = normalization.totalSourceRows;
-    const systemInstruction = `You are Vayu AI. Generate three SEPARATE, non-overlapping action lists tailored strictly to each authority's real-world powers based ONLY on the verified dataset below:
+    const digest = buildCompactEvidenceDigest(normalization);
+    const cacheKey = makeCacheKey('/api/brief-all-roles', digest);
+    const cached = getCachedAiResponse<Record<UserRole, ActionItem[]>>(cacheKey);
+    if (cached) {
+      res.json(cached);
+      return;
+    }
+
+    const systemInstruction = `You are Vayu AI. Generate 3 concise, SEPARATE, non-overlapping action items per authority based ONLY on the verified digest below:
 1. ward_officer: ${ROLE_INSTRUCTIONS.ward_officer}
 2. housing_society: ${ROLE_INSTRUCTIONS.housing_society}
 3. school: ${ROLE_INSTRUCTIONS.school}
-Every action item MUST cite valid rowIndex numbers from 1..${maxRow} and NEVER fabricate measurements.`;
+Keep each rationale to 1 crisp sentence, cite valid rowIndex numbers (1..${maxRow}), and NEVER fabricate measurements.`;
 
     const actionItemSchema = {
       type: Type.OBJECT,
@@ -962,16 +933,9 @@ Every action item MUST cite valid rowIndex numbers from 1..${maxRow} and NEVER f
 
     const result = await generateJsonWithRetry<Record<UserRole, ActionItem[]>>({
       systemInstruction,
-      contents: JSON.stringify({
-        datasetTitle: normalization.datasetTitle,
-        overallNaqi: normalization.overallNaqi,
-        overallCategory: normalization.overallCategory,
-        stationSummaries: normalization.stationSummaries,
-        issues: normalization.issues,
-        readings: compactReadingsForPrompt(normalization.readings),
-      }),
+      contents: JSON.stringify(digest),
       responseSchema,
-      thinkingLevel: ThinkingLevel.MEDIUM,
+      thinkingLevel: ThinkingLevel.LOW,
     });
 
     const sanitize = (items: ActionItem[] | undefined) =>
@@ -980,11 +944,13 @@ Every action item MUST cite valid rowIndex numbers from 1..${maxRow} and NEVER f
         citedRows: filterValidRowIds(a.citedRows, maxRow),
       }));
 
-    res.json({
+    const responsePayload = {
       ward_officer: sanitize(result.ward_officer),
       housing_society: sanitize(result.housing_society),
       school: sanitize(result.school),
-    });
+    };
+    setCachedAiResponse(cacheKey, responsePayload);
+    res.json(responsePayload);
   } catch (error) {
     console.error('All-roles brief error:', error);
     const message = error instanceof Error ? error.message : 'Failed to generate role matrix.';
