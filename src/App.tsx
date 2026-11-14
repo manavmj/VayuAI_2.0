@@ -16,6 +16,12 @@ import type {
   WorkspaceStep,
 } from './types/vayu.ts';
 import { deleteSavedBrief, loadSavedBriefs, saveBriefSnapshot } from './utils/naqi.ts';
+import {
+  apiFetch,
+  fetchCurrentSessionUser,
+  scrubLegacyInsecureStorage,
+  setSessionToken,
+} from './utils/authClient.ts';
 import { MESSY_TEST_FIXTURE, parseRawTextToSourceRows } from './utils/parser.ts';
 import { TopBar } from './components/TopBar.tsx';
 import { LandingStep } from './components/LandingStep.tsx';
@@ -36,18 +42,9 @@ const ZOOM_CLASS_MAP: Record<number, string> = {
   130: '[zoom:1.3]',
 };
 
-const SESSION_STORAGE_KEY = 'vayu_ai_active_session_v1';
-
 export default function App() {
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(() => {
-    try {
-      const raw = localStorage.getItem(SESSION_STORAGE_KEY);
-      return raw ? (JSON.parse(raw) as AuthUser) : null;
-    } catch {
-      return null;
-    }
-  });
-
+  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
+  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState<WorkspaceStep>('landing');
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'register'>('login');
   const [authInitialRole, setAuthInitialRole] = useState<UserRole>('ward_officer');
@@ -89,25 +86,43 @@ export default function App() {
 
   useEffect(() => {
     setSavedSnapshots(loadSavedBriefs());
+    scrubLegacyInsecureStorage();
+    void fetchCurrentSessionUser().then((verifiedUser) => {
+      if (verifiedUser) {
+        setCurrentUser(verifiedUser);
+        setRole(verifiedUser.role);
+      }
+    });
+  }, []);
+
+  const handleSessionExpired = useCallback((message?: string) => {
+    setSessionToken(null);
+    setCurrentUser(null);
+    setSessionNotice(
+      message || 'Your session expired or could not be verified. Please sign in again.'
+    );
+    setActiveStep('auth');
   }, []);
 
   const handleOpenAuth = (mode: 'login' | 'register', targetRole: UserRole = 'ward_officer') => {
+    setSessionNotice(null);
     setAuthInitialMode(mode);
     setAuthInitialRole(targetRole);
     setActiveStep('auth');
   };
 
   const handleAuthenticated = (user: AuthUser) => {
-    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(user));
+    setSessionNotice(null);
     setCurrentUser(user);
     setRole(user.role);
     setActiveStep('ingest');
   };
 
   const handleLogout = () => {
-    localStorage.removeItem(SESSION_STORAGE_KEY);
+    setSessionToken(null);
     setCurrentUser(null);
     setActiveStep('landing');
+    void apiFetch('/api/auth/logout', { method: 'POST' });
   };
 
   const navigateSafely = (step: WorkspaceStep) => {
@@ -148,15 +163,18 @@ export default function App() {
       setApiError(null);
 
       try {
-        const response = await fetch('/api/normalize', {
+        const response = await apiFetch('/api/normalize', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             sourceRows: rowsToUse,
             datasetTitle: titleToUse.trim() || undefined,
           }),
         });
         const data = await response.json();
+        if (response.status === 401) {
+          handleSessionExpired(data.error);
+          return;
+        }
         if (!response.ok) {
           throw new Error(data.error || 'Normalization failed.');
         }
@@ -174,7 +192,7 @@ export default function App() {
         setIsNormalizing(false);
       }
     },
-    []
+    [handleSessionExpired]
   );
 
   const handleNormalize = () => {
@@ -208,9 +226,8 @@ export default function App() {
       setIsLoadingBrief(true);
       setApiError(null);
       try {
-        const response = await fetch('/api/brief', {
+        const response = await apiFetch('/api/brief', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             normalization: targetNorm,
             role: targetRole,
@@ -219,6 +236,10 @@ export default function App() {
           }),
         });
         const data = await response.json();
+        if (response.status === 401) {
+          handleSessionExpired(data.error);
+          return;
+        }
         if (!response.ok) {
           throw new Error(data.error || 'Failed to generate briefings.');
         }
@@ -232,7 +253,7 @@ export default function App() {
         setIsLoadingBrief(false);
       }
     },
-    []
+    [handleSessionExpired]
   );
 
   const handleGenerateAllRoles = async () => {
@@ -240,12 +261,15 @@ export default function App() {
     setIsLoadingAllRoles(true);
     setApiError(null);
     try {
-      const response = await fetch('/api/brief-all-roles', {
+      const response = await apiFetch('/api/brief-all-roles', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ normalization }),
       });
       const data = await response.json();
+      if (response.status === 401) {
+        handleSessionExpired(data.error);
+        return;
+      }
       if (!response.ok) {
         throw new Error(data.error || 'Failed to build 3-role matrix.');
       }
@@ -289,9 +313,8 @@ export default function App() {
     setIsUpdatingAdvisory(true);
     setApiError(null);
     try {
-      const response = await fetch('/api/advisory', {
+      const response = await apiFetch('/api/advisory', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           normalization,
           internalBriefing,
@@ -300,6 +323,10 @@ export default function App() {
         }),
       });
       const data = await response.json();
+      if (response.status === 401) {
+        handleSessionExpired(data.error);
+        return;
+      }
       if (!response.ok) {
         throw new Error(data.error || 'Failed to update Citizen Advisory.');
       }
@@ -347,9 +374,8 @@ export default function App() {
     setIsComparing(true);
     setCompareError(null);
     try {
-      const response = await fetch('/api/compare', {
+      const response = await apiFetch('/api/compare', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           currentNormalization: normalization,
           previousLabel,
@@ -357,6 +383,10 @@ export default function App() {
         }),
       });
       const data = await response.json();
+      if (response.status === 401) {
+        handleSessionExpired(data.error);
+        return;
+      }
       if (!response.ok) {
         throw new Error(data.error || 'Comparison failed.');
       }
@@ -522,6 +552,7 @@ export default function App() {
             initialMode={authInitialMode}
             initialRole={authInitialRole}
             language={language}
+            sessionNotice={sessionNotice}
             onAuthenticated={handleAuthenticated}
             onBackHome={() => setActiveStep('landing')}
           />

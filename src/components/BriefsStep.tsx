@@ -26,6 +26,7 @@ import type {
   UserRole,
 } from '../types/vayu.ts';
 import { ROLE_META } from '../utils/naqi.ts';
+import { ROLE_CIVIC_IMAGES } from '../assets/civicImages.ts';
 import { VayuWordmark } from './VayuWordmark.tsx';
 
 interface BriefsStepProps {
@@ -55,20 +56,7 @@ const ROLE_ICONS: Record<UserRole, React.ReactNode> = {
   school: <GraduationCap className="h-4 w-4" aria-hidden="true" />,
 };
 
-const ROLE_IMAGES: Record<UserRole, { src: string; alt: string }> = {
-  ward_officer: {
-    src: '/src/assets/images/civic_ward_monitoring_1794640282835.jpg',
-    alt: 'Urban municipal avenue with roadside solar air-quality monitoring kiosk',
-  },
-  housing_society: {
-    src: '/src/assets/images/housing_society_greenery_1794640283246.jpg',
-    alt: 'Residential housing society courtyard with green hedges and pathway misting',
-  },
-  school: {
-    src: '/src/assets/images/school_clean_air_1794640284649.jpg',
-    alt: 'School campus courtyard with green trees and ventilated classrooms',
-  },
-};
+const ROLE_IMAGES = ROLE_CIVIC_IMAGES;
 
 export const BriefsStep: React.FC<BriefsStepProps> = ({
   normalization,
@@ -148,7 +136,7 @@ export const BriefsStep: React.FC<BriefsStepProps> = ({
 
     const escapeCsv = (value: string | number | null | undefined): string => {
       const str = String(value ?? '');
-      const neutralized = /^[=+\-@]/.test(str) ? `'${str}` : str;
+      const neutralized = /^[=+\-@\t\r]/.test(str) ? `'${str}` : str;
       return `"${neutralized.replace(/"/g, '""')}"`;
     };
 
@@ -415,7 +403,7 @@ export const BriefsStep: React.FC<BriefsStepProps> = ({
           <img
             src={roleImage.src}
             alt={roleImage.alt}
-            referrerPolicy="no-referrer"
+            decoding="async"
             className="h-full w-full object-cover"
           />
         </div>
@@ -498,7 +486,8 @@ export const BriefsStep: React.FC<BriefsStepProps> = ({
                     <img
                       src={ROLE_IMAGES[rKey].src}
                       alt={ROLE_IMAGES[rKey].alt}
-                      referrerPolicy="no-referrer"
+                      loading="lazy"
+                      decoding="async"
                       className="h-full w-full object-cover"
                     />
                   </div>

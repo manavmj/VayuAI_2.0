@@ -13,6 +13,7 @@ import {
   UserPlus,
 } from 'lucide-react';
 import type { AdvisoryLanguage, AuthUser, UserRole } from '../types/vayu.ts';
+import { HERO_CANOPY_IMAGE, ROLE_CIVIC_IMAGES } from '../assets/civicImages.ts';
 import { UnitConverterTool } from './UnitConverterTool.tsx';
 import { VayuWordmark } from './VayuWordmark.tsx';
 
@@ -41,8 +42,8 @@ const ROLE_CARDS: {
     role: 'ward_officer',
     titleEn: 'Ward Officer',
     titleHi: 'वार्ड अधिकारी',
-    image: '/src/assets/images/civic_ward_monitoring_1794640282835.jpg',
-    alt: 'Solar-powered municipal roadside air quality monitoring station along a tree-lined Indian avenue',
+    image: ROLE_CIVIC_IMAGES.ward_officer.src,
+    alt: ROLE_CIVIC_IMAGES.ward_officer.alt,
     authorityEn: 'Municipal street-level enforcement, dust audits & traffic control',
     authorityHi: 'सड़क की धूल नियंत्रण, निर्माण स्थल जांच और ट्रैफिक प्रबंधन',
     actionsEn: [
@@ -60,8 +61,8 @@ const ROLE_CARDS: {
     role: 'housing_society',
     titleEn: 'Housing Society (RWA)',
     titleHi: 'हाउसिंग सोसाइटी (RWA)',
-    image: '/src/assets/images/housing_society_greenery_1794640283246.jpg',
-    alt: 'Green residential housing society courtyard with shaded pathways and water misting dust suppression',
+    image: ROLE_CIVIC_IMAGES.housing_society.src,
+    alt: ROLE_CIVIC_IMAGES.housing_society.alt,
     authorityEn: 'Premise-level operational limits, generator scheduling & resident care',
     authorityHi: 'परिसर स्तर पर डीजी सेट नियंत्रण, छिड़काव और निवासी सुरक्षा',
     actionsEn: [
@@ -79,8 +80,8 @@ const ROLE_CARDS: {
     role: 'school',
     titleEn: 'School Administration',
     titleHi: 'विद्यालय प्रशासन',
-    image: '/src/assets/images/school_clean_air_1794640284649.jpg',
-    alt: 'Sunlit school campus courtyard surrounded by trees with students entering a ventilated building',
+    image: ROLE_CIVIC_IMAGES.school.src,
+    alt: ROLE_CIVIC_IMAGES.school.alt,
     authorityEn: 'Student schedule adjustments, masking & campus indoor air hygiene',
     authorityHi: 'छात्रों की सुरक्षा, इनडोर प्रार्थना सभा और मास्क नियम',
     actionsEn: [
@@ -153,9 +154,9 @@ export const LandingStep: React.FC<LandingStepProps> = ({
         className="relative overflow-hidden rounded-[2.5rem_0.75rem_2.5rem_0.75rem] border border-[#16a34a]/20 bg-[#132a17] shadow-[0_24px_48px_-12px_rgba(20,83,45,0.22)]"
       >
         <img
-          src="/src/assets/images/hero_canopy_sunlight_1794640282489.jpg"
+          src={HERO_CANOPY_IMAGE}
           alt="Sunlit green forest canopy representing clean breathable civic air"
-          referrerPolicy="no-referrer"
+          decoding="async"
           className="absolute inset-0 h-full w-full object-cover object-center"
         />
         <div
@@ -420,7 +421,8 @@ export const LandingStep: React.FC<LandingStepProps> = ({
                 <img
                   src={card.image}
                   alt={card.alt}
-                  referrerPolicy="no-referrer"
+                  loading="lazy"
+                  decoding="async"
                   className="h-full w-full object-cover"
                 />
               </div>

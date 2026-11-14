@@ -1,11 +1,31 @@
 import 'dotenv/config';
+import { randomBytes } from 'node:crypto';
 import express from 'express';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import {
+  authenticateAccount,
+  clearFailedLogin,
+  clearSessionCookie,
+  createRateLimiter,
+  extractAuthUser,
+  isValidEmail,
+  isValidRole,
+  recordFailedLogin,
+  registerAccount,
+  requireAuth,
+  sanitizeTextInput,
+  securityHeadersMiddleware,
+  setSessionCookie,
+  signSessionToken,
+  validatePasswordStrength,
+  checkLoginLockout,
+} from './server/security.ts';
 import type {
   ActionItem,
   AdvisoryLanguage,
+  AuthUser,
   CitizenAdvisory,
   ComparisonResult,
   InternalBriefing,
@@ -108,9 +128,191 @@ const ROLE_INSTRUCTIONS: Record<UserRole, string> = {
 };
 
 const app = express();
+app.disable('x-powered-by');
+app.set('trust proxy', 1);
+app.use(securityHeadersMiddleware);
 app.use(express.json({ limit: '2mb' }));
 
-app.post('/api/normalize', async (req, res) => {
+const authLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 25,
+  keyPrefix: 'auth',
+});
+
+const aiLimiter = createRateLimiter({
+  windowMs: 60 * 1000,
+  maxRequests: 30,
+  keyPrefix: 'ai',
+});
+
+// Authentication & Session Endpoints
+app.get('/api/auth/me', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const user = extractAuthUser(req);
+  res.json({ user: user || null });
+});
+
+app.post('/api/auth/register', authLimiter, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const { name, organization, email, role, password } = req.body as {
+    name?: unknown;
+    organization?: unknown;
+    email?: unknown;
+    role?: unknown;
+    password?: unknown;
+  };
+
+  const cleanName = sanitizeTextInput(name, 80);
+  const cleanOrg = sanitizeTextInput(organization, 120);
+  const cleanEmail = sanitizeTextInput(email, 160).toLowerCase();
+  const rawPassword = typeof password === 'string' ? password : '';
+
+  if (!cleanName || cleanName.length < 2) {
+    res.status(400).json({ error: 'Please enter your full name (at least 2 characters).' });
+    return;
+  }
+  if (!cleanOrg || cleanOrg.length < 2) {
+    res.status(400).json({ error: 'Please enter your ward, housing society, or school name.' });
+    return;
+  }
+  if (!isValidEmail(cleanEmail)) {
+    res.status(400).json({ error: 'Please enter a valid email address.' });
+    return;
+  }
+  if (!isValidRole(role)) {
+    res.status(400).json({ error: 'Please select a valid civic role.' });
+    return;
+  }
+
+  const strengthError = validatePasswordStrength(rawPassword);
+  if (strengthError) {
+    res.status(400).json({ error: strengthError });
+    return;
+  }
+
+  const created = registerAccount({
+    name: cleanName,
+    organization: cleanOrg,
+    email: cleanEmail,
+    role,
+    password: rawPassword,
+  });
+
+  if (!created.ok) {
+    res.status(created.status).json({ error: created.error });
+    return;
+  }
+
+  const token = signSessionToken(created.user);
+  setSessionCookie(req, res, token, false);
+  res.status(201).json({ user: created.user, sessionToken: token });
+});
+
+app.post('/api/auth/login', authLimiter, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const { email, role, password } = req.body as {
+    email?: unknown;
+    role?: unknown;
+    password?: unknown;
+  };
+
+  const cleanEmail = sanitizeTextInput(email, 160).toLowerCase();
+  const rawPassword = typeof password === 'string' ? password : '';
+
+  if (!isValidEmail(cleanEmail) || !rawPassword) {
+    res.status(400).json({ error: 'Please enter a valid email address and password.' });
+    return;
+  }
+  if (!isValidRole(role)) {
+    res.status(400).json({ error: 'Please select a valid civic role.' });
+    return;
+  }
+
+  const lockout = checkLoginLockout(req, cleanEmail, role);
+  if (lockout.locked) {
+    res.setHeader('Retry-After', String(lockout.retryAfterSec));
+    res.status(429).json({
+      error: `Too many failed login attempts. Account sign-in temporarily locked for ${Math.ceil(lockout.retryAfterSec / 60)} min (${lockout.retryAfterSec}s).`,
+    });
+    return;
+  }
+
+  const authenticated = authenticateAccount({
+    email: cleanEmail,
+    role,
+    password: rawPassword,
+  });
+
+  if (!authenticated) {
+    const attempt = recordFailedLogin(req, cleanEmail, role);
+    if (attempt.lockedOut) {
+      res.setHeader('Retry-After', String(attempt.retryAfterSec));
+      res.status(429).json({
+        error: `Too many failed attempts. Login temporarily locked for ${Math.ceil(attempt.retryAfterSec / 60)} minutes.`,
+      });
+      return;
+    }
+    res.status(401).json({
+      error: `Invalid email, role, or password. ${attempt.remainingAttempts} attempt(s) remaining before temporary lockout.`,
+    });
+    return;
+  }
+
+  clearFailedLogin(req, cleanEmail, role);
+  const token = signSessionToken(authenticated);
+  setSessionCookie(req, res, token, false);
+  res.json({ user: authenticated, sessionToken: token });
+});
+
+app.post('/api/auth/evaluator-session', authLimiter, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const { role } = req.body as { role?: unknown };
+  if (!isValidRole(role)) {
+    res.status(400).json({ error: 'Invalid civic role requested.' });
+    return;
+  }
+
+  const labelMap: Record<UserRole, { name: string; org: string; email: string }> = {
+    ward_officer: {
+      name: 'Ward Officer Evaluator',
+      org: 'Municipal Enforcement Sandbox',
+      email: 'ward.evaluator@vayu.civic',
+    },
+    housing_society: {
+      name: 'RWA Coordinator Evaluator',
+      org: 'Housing Society Sandbox',
+      email: 'rwa.evaluator@vayu.civic',
+    },
+    school: {
+      name: 'School Principal Evaluator',
+      org: 'Campus Safety Sandbox',
+      email: 'school.evaluator@vayu.civic',
+    },
+  };
+
+  const info = labelMap[role];
+  const demoUser: AuthUser = {
+    id: `eval-${role}-${randomBytes(6).toString('hex')}`,
+    name: info.name,
+    organization: info.org,
+    email: info.email,
+    role,
+    createdAt: new Date().toISOString(),
+    isDemo: true,
+  };
+
+  const token = signSessionToken(demoUser);
+  setSessionCookie(req, res, token, true);
+  res.json({ user: demoUser, sessionToken: token });
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  clearSessionCookie(req, res);
+  res.json({ ok: true });
+});
+
+app.post('/api/normalize', requireAuth, aiLimiter, async (req, res) => {
   try {
     const { sourceRows, datasetTitle } = req.body as {
       sourceRows?: SourceRow[];
@@ -340,7 +542,7 @@ Rules:
   }
 });
 
-app.post('/api/brief', async (req, res) => {
+app.post('/api/brief', requireAuth, aiLimiter, async (req, res) => {
   try {
     const { normalization, role, language, readingLevel } = req.body as {
       normalization?: NormalizationResult;
@@ -483,7 +685,7 @@ ${ROLE_INSTRUCTIONS[activeRole]}
   }
 });
 
-app.post('/api/advisory', async (req, res) => {
+app.post('/api/advisory', requireAuth, aiLimiter, async (req, res) => {
   try {
     const { normalization, internalBriefing, language, readingLevel } = req.body as {
       normalization?: NormalizationResult;
@@ -564,7 +766,7 @@ Include specific guidance for children, older adults, and respiratory-sensitive 
   }
 });
 
-app.post('/api/compare', async (req, res) => {
+app.post('/api/compare', requireAuth, aiLimiter, async (req, res) => {
   try {
     const { currentNormalization, previousLabel, previousContent } = req.body as {
       currentNormalization?: NormalizationResult;
@@ -696,7 +898,7 @@ Rules:
   }
 });
 
-app.post('/api/brief-all-roles', async (req, res) => {
+app.post('/api/brief-all-roles', requireAuth, aiLimiter, async (req, res) => {
   try {
     const { normalization } = req.body as {
       normalization?: NormalizationResult;
@@ -768,7 +970,7 @@ Every action item MUST cite valid rowIndex numbers from 1..${maxRow} and NEVER f
   }
 });
 
-app.post('/api/pawan', async (req, res) => {
+app.post('/api/pawan', aiLimiter, async (req, res) => {
   try {
     const { message, context } = req.body as {
       message?: string;

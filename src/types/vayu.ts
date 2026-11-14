@@ -7,6 +7,7 @@ export interface AuthUser {
   email: string;
   role: UserRole;
   createdAt: string;
+  isDemo?: boolean;
 }
 
 export type NaqiCategory =

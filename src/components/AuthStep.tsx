@@ -1,49 +1,27 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ArrowRight,
   Building2,
+  CheckCircle2,
+  Eye,
+  EyeOff,
   GraduationCap,
   Landmark,
+  Lock,
   LogIn,
   ShieldCheck,
   UserPlus,
 } from 'lucide-react';
 import type { AdvisoryLanguage, AuthUser, UserRole } from '../types/vayu.ts';
 import { ROLE_META } from '../utils/naqi.ts';
-
-interface StoredAccount extends AuthUser {
-  passwordHash: string;
-}
-
-const ACCOUNTS_KEY = 'vayu_ai_accounts_v1';
-
-async function hashPassword(password: string): Promise<string> {
-  const encoded = new TextEncoder().encode(password);
-  const digest = await crypto.subtle.digest('SHA-256', encoded);
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
-}
-
-function loadAccounts(): StoredAccount[] {
-  try {
-    const raw = localStorage.getItem(ACCOUNTS_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function saveAccounts(accounts: StoredAccount[]): void {
-  localStorage.setItem(ACCOUNTS_KEY, JSON.stringify(accounts));
-}
+import { ROLE_CIVIC_IMAGES } from '../assets/civicImages.ts';
+import { apiFetch, setSessionToken } from '../utils/authClient.ts';
 
 interface AuthStepProps {
   initialMode: 'login' | 'register';
   initialRole: UserRole;
   language: AdvisoryLanguage;
+  sessionNotice?: string | null;
   onAuthenticated: (user: AuthUser) => void;
   onBackHome: () => void;
 }
@@ -57,20 +35,20 @@ const ROLE_CARDS: Array<{
   {
     role: 'ward_officer',
     icon: <Landmark className="h-4 w-4" aria-hidden="true" />,
-    image: '/src/assets/images/civic_ward_monitoring_1794640282835.jpg',
-    alt: 'Municipal ward roadside air quality monitoring station',
+    image: ROLE_CIVIC_IMAGES.ward_officer.src,
+    alt: ROLE_CIVIC_IMAGES.ward_officer.alt,
   },
   {
     role: 'housing_society',
     icon: <Building2 className="h-4 w-4" aria-hidden="true" />,
-    image: '/src/assets/images/housing_society_greenery_1794640283246.jpg',
-    alt: 'Green residential housing society courtyard',
+    image: ROLE_CIVIC_IMAGES.housing_society.src,
+    alt: ROLE_CIVIC_IMAGES.housing_society.alt,
   },
   {
     role: 'school',
     icon: <GraduationCap className="h-4 w-4" aria-hidden="true" />,
-    image: '/src/assets/images/school_clean_air_1794640284649.jpg',
-    alt: 'School campus courtyard with clean air trees',
+    image: ROLE_CIVIC_IMAGES.school.src,
+    alt: ROLE_CIVIC_IMAGES.school.alt,
   },
 ];
 
@@ -78,6 +56,7 @@ export const AuthStep: React.FC<AuthStepProps> = ({
   initialMode,
   initialRole,
   language,
+  sessionNotice,
   onAuthenticated,
   onBackHome,
 }) => {
@@ -88,106 +67,120 @@ export const AuthStep: React.FC<AuthStepProps> = ({
   const [organization, setOrganization] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [error, setError] = useState<string | null>(null);
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState<string | null>(sessionNotice || null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [loadingDemoRole, setLoadingDemoRole] = useState<UserRole | null>(null);
+
+  const passwordChecks = useMemo(
+    () => ({
+      minLen: password.length >= 8,
+      hasUpper: /[A-Z]/.test(password),
+      hasLower: /[a-z]/.test(password),
+      hasNumOrSymbol: /[0-9!@#$%^&*()_+\-=[\]{};':"\\|,.<>/?]/.test(password),
+    }),
+    [password]
+  );
+
+  const passedCheckCount = Object.values(passwordChecks).filter(Boolean).length;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
     const trimmedEmail = email.trim().toLowerCase();
 
-    if (!trimmedEmail || !password.trim()) {
-      setError('Please enter both email and password.');
+    if (!trimmedEmail || !password) {
+      setError('Please enter both your email address and password.');
       return;
+    }
+
+    if (mode === 'register') {
+      if (!name.trim() || !organization.trim()) {
+        setError('Please enter your full name and ward, housing society, or school name.');
+        return;
+      }
+      if (passedCheckCount < 4) {
+        setError(
+          'Password must be at least 8 characters and include uppercase, lowercase, and a number or symbol.'
+        );
+        return;
+      }
+      if (password !== confirmPassword) {
+        setError('Passwords do not match. Please re-enter the same password.');
+        return;
+      }
     }
 
     setIsSubmitting(true);
     try {
-      const accounts = loadAccounts();
-      const pwHash = await hashPassword(password);
+      const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const payload =
+        mode === 'register'
+          ? {
+              name: name.trim(),
+              organization: organization.trim(),
+              email: trimmedEmail,
+              role: selectedRole,
+              password,
+            }
+          : {
+              email: trimmedEmail,
+              role: selectedRole,
+              password,
+            };
 
-      if (mode === 'register') {
-        if (!name.trim() || !organization.trim()) {
-          setError('Please enter your full name and ward / society / school name.');
-          setIsSubmitting(false);
-          return;
-        }
-        const exists = accounts.some(
-          (acc) => acc.email === trimmedEmail && acc.role === selectedRole
-        );
-        if (exists) {
-          setError(
-            `An account for ${trimmedEmail} under ${ROLE_META[selectedRole].label} already exists. Switch to Login.`
-          );
-          setIsSubmitting(false);
-          return;
-        }
+      const response = await apiFetch(endpoint, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
 
-        const newAccount: StoredAccount = {
-          id: `usr-${Date.now()}`,
-          name: name.trim(),
-          organization: organization.trim(),
-          email: trimmedEmail,
-          role: selectedRole,
-          createdAt: new Date().toISOString(),
-          passwordHash: pwHash,
-        };
-        saveAccounts([newAccount, ...accounts]);
-        const { passwordHash: _omit, ...publicUser } = newAccount;
-        onAuthenticated(publicUser);
-      } else {
-        const matched = accounts.find(
-          (acc) => acc.email === trimmedEmail && acc.role === selectedRole
-        );
-        if (!matched) {
-          setError(
-            `No registered ${ROLE_META[selectedRole].label} account found for ${trimmedEmail}. Please register first or use Instant Role Access below.`
-          );
-          setIsSubmitting(false);
-          return;
-        }
-        if (matched.passwordHash !== pwHash) {
-          setError('Incorrect password for this role account.');
-          setIsSubmitting(false);
-          return;
-        }
-        const { passwordHash: _omit, ...publicUser } = matched;
-        onAuthenticated(publicUser);
+      const data = (await response.json()) as {
+        user?: AuthUser;
+        sessionToken?: string;
+        error?: string;
+      };
+
+      if (!response.ok || !data.user || !data.sessionToken) {
+        setError(data.error || 'Authentication failed. Please check your credentials.');
+        return;
       }
+
+      setSessionToken(data.sessionToken);
+      setPassword('');
+      setConfirmPassword('');
+      onAuthenticated(data.user);
     } catch {
-      setError('Authentication could not be completed. Please try again.');
+      setError('Unable to reach the authentication server. Please try again.');
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const handleInstantRoleAccess = (targetRole: UserRole) => {
-    const labelMap: Record<UserRole, { name: string; org: string; email: string }> = {
-      ward_officer: {
-        name: 'Ward Officer Session',
-        org: 'Municipal Enforcement Desk',
-        email: 'ward.officer@vayu.civic',
-      },
-      housing_society: {
-        name: 'RWA Coordinator Session',
-        org: 'Housing Society Management',
-        email: 'rwa.admin@vayu.civic',
-      },
-      school: {
-        name: 'School Principal Session',
-        org: 'Campus Health & Safety Desk',
-        email: 'school.admin@vayu.civic',
-      },
-    };
-    const info = labelMap[targetRole];
-    onAuthenticated({
-      id: `session-${targetRole}-${Date.now()}`,
-      name: info.name,
-      organization: info.org,
-      email: info.email,
-      role: targetRole,
-      createdAt: new Date().toISOString(),
-    });
+  const handleEvaluatorSession = async (targetRole: UserRole) => {
+    setError(null);
+    setLoadingDemoRole(targetRole);
+    try {
+      const response = await apiFetch('/api/auth/evaluator-session', {
+        method: 'POST',
+        body: JSON.stringify({ role: targetRole }),
+      });
+      const data = (await response.json()) as {
+        user?: AuthUser;
+        sessionToken?: string;
+        error?: string;
+      };
+      if (!response.ok || !data.user || !data.sessionToken) {
+        setError(data.error || 'Could not start evaluator session.');
+        return;
+      }
+      setSessionToken(data.sessionToken);
+      onAuthenticated(data.user);
+    } catch {
+      setError('Unable to issue evaluator session. Please try again.');
+    } finally {
+      setLoadingDemoRole(null);
+    }
   };
 
   return (
@@ -195,34 +188,34 @@ export const AuthStep: React.FC<AuthStepProps> = ({
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.04em] text-[#15803d]">
-            {isHi ? 'भूमिका-आधारित प्रवेश' : 'Role-Based Access Gateway'}
+            {isHi ? 'भूमिका-आधारित सुरक्षित प्रवेश' : 'Signed Role-Based Access Gateway'}
           </p>
           <h1
             id="auth-heading"
             className="mt-1 font-display text-2xl sm:text-3xl font-bold text-[#131b2e]"
           >
             {isHi
-              ? 'अपनी नागरिक भूमिका चुनें और लॉगिन या पंजीकरण करें'
+              ? 'अपनी नागरिक भूमिका चुनें और सुरक्षित लॉगिन या पंजीकरण करें'
               : 'Sign in or Register to Unlock Data Ingestion & Dashboards'}
           </h1>
           <p className="mt-1 text-sm text-[#3f493f]">
             {isHi
               ? 'लॉगिन के बाद डेटा अपलोड, स्वच्छता डैशबोर्ड, ब्रीफिंग और तुलना विकल्प खुलेंगे।'
-              : 'Select whether you are acting as a Ward Officer, Housing Society (RWA), or School Administration.'}
+              : 'Protected by server-side salted scrypt hashing, HMAC-signed sessions, and brute-force lockout.'}
           </p>
         </div>
 
         <button
           type="button"
           onClick={onBackHome}
-          className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-[#131b2e] hover:bg-slate-50"
+          className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-semibold text-[#131b2e] hover:bg-slate-50 focus-visible:outline-2 focus-visible:outline-[#16a34a]"
         >
           {isHi ? '← होम पेज पर लौटें' : '← Back to Home & Guidelines'}
         </button>
       </div>
 
       {/* Role Selection Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4" role="group" aria-label="Civic Roles">
         {ROLE_CARDS.map((card) => {
           const active = selectedRole === card.role;
           const meta = ROLE_META[card.role];
@@ -232,7 +225,7 @@ export const AuthStep: React.FC<AuthStepProps> = ({
               type="button"
               onClick={() => setSelectedRole(card.role)}
               aria-pressed={active}
-              className={`text-left overflow-hidden rounded-2xl border transition-all ${
+              className={`text-left overflow-hidden rounded-2xl border transition-all focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#16a34a] ${
                 active
                   ? 'border-[#15803d] ring-2 ring-[#16a34a]/25 bg-[#f0fdf4]/70'
                   : 'border-slate-200 bg-white hover:border-[#16a34a]/40'
@@ -242,7 +235,7 @@ export const AuthStep: React.FC<AuthStepProps> = ({
                 <img
                   src={card.image}
                   alt={card.alt}
-                  referrerPolicy="no-referrer"
+                  decoding="async"
                   className="h-full w-full object-cover"
                 />
               </div>
@@ -269,9 +262,10 @@ export const AuthStep: React.FC<AuthStepProps> = ({
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <form
           onSubmit={(e) => void handleSubmit(e)}
+          noValidate
           className="lg:col-span-7 rounded-2xl border border-slate-200 bg-white p-6 space-y-5"
         >
-          <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 pb-4">
             <div className="inline-flex rounded-xl bg-[#f2f3ff] p-1">
               <button
                 type="button"
@@ -279,6 +273,7 @@ export const AuthStep: React.FC<AuthStepProps> = ({
                   setMode('login');
                   setError(null);
                 }}
+                aria-pressed={mode === 'login'}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors ${
                   mode === 'login' ? 'bg-[#15803d] text-white shadow-sm' : 'text-[#3f493f]'
                 }`}
@@ -292,6 +287,7 @@ export const AuthStep: React.FC<AuthStepProps> = ({
                   setMode('register');
                   setError(null);
                 }}
+                aria-pressed={mode === 'register'}
                 className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-xs font-semibold transition-colors ${
                   mode === 'register' ? 'bg-[#15803d] text-white shadow-sm' : 'text-[#3f493f]'
                 }`}
@@ -301,7 +297,8 @@ export const AuthStep: React.FC<AuthStepProps> = ({
               </button>
             </div>
 
-            <span className="text-xs font-semibold text-[#00652c]">
+            <span className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#00652c]">
+              <Lock className="h-3.5 w-3.5" aria-hidden="true" />
               Role: {ROLE_META[selectedRole].label}
             </span>
           </div>
@@ -315,6 +312,9 @@ export const AuthStep: React.FC<AuthStepProps> = ({
                 <input
                   id="auth-name"
                   type="text"
+                  autoComplete="name"
+                  maxLength={80}
+                  required
                   value={name}
                   onChange={(e) => setName(e.target.value)}
                   placeholder="e.g., Ananya Sharma"
@@ -332,6 +332,9 @@ export const AuthStep: React.FC<AuthStepProps> = ({
                 <input
                   id="auth-org"
                   type="text"
+                  autoComplete="organization"
+                  maxLength={120}
+                  required
                   value={organization}
                   onChange={(e) => setOrganization(e.target.value)}
                   placeholder={
@@ -354,6 +357,9 @@ export const AuthStep: React.FC<AuthStepProps> = ({
             <input
               id="auth-email"
               type="email"
+              autoComplete="email"
+              maxLength={160}
+              required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@organization.org"
@@ -362,48 +368,169 @@ export const AuthStep: React.FC<AuthStepProps> = ({
           </div>
 
           <div>
-            <label htmlFor="auth-password" className="block text-xs font-semibold text-[#3f493f]">
-              Password
-            </label>
-            <input
-              id="auth-password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="Enter password"
-              className="mt-1.5 w-full rounded-lg border border-slate-200 bg-[#faf8ff] px-3.5 py-2 text-sm text-[#131b2e] focus:border-[#16a34a] focus:outline-none"
-            />
+            <div className="flex items-center justify-between">
+              <label htmlFor="auth-password" className="block text-xs font-semibold text-[#3f493f]">
+                Password
+              </label>
+              {mode === 'register' && (
+                <span className="text-[11px] font-mono text-slate-500">
+                  Strength: {passedCheckCount}/4
+                </span>
+              )}
+            </div>
+            <div className="relative mt-1.5">
+              <input
+                id="auth-password"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete={mode === 'register' ? 'new-password' : 'current-password'}
+                maxLength={128}
+                required
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={
+                  mode === 'register'
+                    ? 'Minimum 8 chars (A-Z, a-z, 0-9/symbol)'
+                    : 'Enter your password'
+                }
+                aria-describedby={mode === 'register' ? 'password-policy' : undefined}
+                className="w-full rounded-lg border border-slate-200 bg-[#faf8ff] pl-3.5 pr-11 py-2 text-sm text-[#131b2e] focus:border-[#16a34a] focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setShowPassword((prev) => !prev)}
+                aria-label={showPassword ? 'Hide password' : 'Show password'}
+                aria-pressed={showPassword}
+                className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-1 text-slate-500 hover:text-[#131b2e] focus-visible:outline-2 focus-visible:outline-[#16a34a]"
+              >
+                {showPassword ? (
+                  <EyeOff className="h-4 w-4" aria-hidden="true" />
+                ) : (
+                  <Eye className="h-4 w-4" aria-hidden="true" />
+                )}
+              </button>
+            </div>
+
+            {mode === 'register' && (
+              <div id="password-policy" aria-live="polite" className="mt-2.5 space-y-2">
+                <div className="grid grid-cols-4 gap-1.5">
+                  {[1, 2, 3, 4].map((step) => (
+                    <div
+                      key={step}
+                      className={`h-1.5 rounded-full transition-colors ${
+                        passedCheckCount >= step
+                          ? passedCheckCount === 4
+                            ? 'bg-[#15803d]'
+                            : 'bg-[#eab308]'
+                          : 'bg-slate-200'
+                      }`}
+                    />
+                  ))}
+                </div>
+                <ul className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-[#3f493f]">
+                  <li className="flex items-center gap-1.5">
+                    <CheckCircle2
+                      className={`h-3 w-3 ${
+                        passwordChecks.minLen ? 'text-[#15803d]' : 'text-slate-300'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>8+ characters</span>
+                  </li>
+                  <li className="flex items-center gap-1.5">
+                    <CheckCircle2
+                      className={`h-3 w-3 ${
+                        passwordChecks.hasUpper ? 'text-[#15803d]' : 'text-slate-300'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>Uppercase letter</span>
+                  </li>
+                  <li className="flex items-center gap-1.5">
+                    <CheckCircle2
+                      className={`h-3 w-3 ${
+                        passwordChecks.hasLower ? 'text-[#15803d]' : 'text-slate-300'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>Lowercase letter</span>
+                  </li>
+                  <li className="flex items-center gap-1.5">
+                    <CheckCircle2
+                      className={`h-3 w-3 ${
+                        passwordChecks.hasNumOrSymbol ? 'text-[#15803d]' : 'text-slate-300'
+                      }`}
+                      aria-hidden="true"
+                    />
+                    <span>Number or symbol</span>
+                  </li>
+                </ul>
+              </div>
+            )}
           </div>
 
+          {mode === 'register' && (
+            <div>
+              <label
+                htmlFor="auth-confirm-password"
+                className="block text-xs font-semibold text-[#3f493f]"
+              >
+                Confirm Password
+              </label>
+              <input
+                id="auth-confirm-password"
+                type={showPassword ? 'text' : 'password'}
+                autoComplete="new-password"
+                maxLength={128}
+                required
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="Re-enter password"
+                className="mt-1.5 w-full rounded-lg border border-slate-200 bg-[#faf8ff] px-3.5 py-2 text-sm text-[#131b2e] focus:border-[#16a34a] focus:outline-none"
+              />
+            </div>
+          )}
+
           {error && (
-            <p role="alert" className="text-xs font-semibold text-[#ba1a1a]">
+            <div
+              role="alert"
+              className="rounded-lg border border-[#ba1a1a]/30 bg-[#ffdad6]/50 px-3.5 py-2.5 text-xs font-semibold text-[#93000a]"
+            >
               {error}
-            </p>
+            </div>
           )}
 
           <button
             type="submit"
             disabled={isSubmitting}
-            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#15803d] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#00652c] disabled:opacity-60"
+            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[#15803d] px-5 py-2.5 text-sm font-semibold text-white hover:bg-[#00652c] disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#16a34a]"
           >
-            {mode === 'register'
-              ? `Register & Enter as ${ROLE_META[selectedRole].label}`
-              : `Login as ${ROLE_META[selectedRole].label}`}
+            {isSubmitting
+              ? 'Verifying...'
+              : mode === 'register'
+                ? `Register & Enter as ${ROLE_META[selectedRole].label}`
+                : `Login as ${ROLE_META[selectedRole].label}`}
             <ArrowRight className="h-4 w-4" aria-hidden="true" />
           </button>
+
+          <p className="text-[11px] text-slate-500 leading-relaxed">
+            Credentials are verified on the Express backend via salted{' '}
+            <span className="font-mono">scrypt</span> + <span className="font-mono">timingSafeEqual</span>
+            ; no passwords or hashes are ever stored in browser storage.
+          </p>
         </form>
 
-        {/* Instant Role Session Access for Evaluators */}
+        {/* Signed Evaluator Sandbox Access */}
         <div className="lg:col-span-5 rounded-2xl border border-[#16a34a]/25 bg-[#f0fdf4]/70 p-6 space-y-4">
           <div className="flex items-center gap-2 text-[#00652c]">
             <ShieldCheck className="h-5 w-5" aria-hidden="true" />
             <h2 className="font-display text-lg font-semibold text-[#131b2e]">
-              Quick Role Session Sign-In
+              Signed Evaluator Session
             </h2>
           </div>
           <p className="text-xs text-[#3f493f] leading-relaxed">
-            Evaluating Vayu AI? Launch an immediate authenticated session for any civic persona to
-            test data ingestion, Recharts integrity dashboards, heatmaps, and role-scoped briefs.
+            Reviewing Vayu AI? Request a 2-hour, server-signed <span className="font-mono">HMAC-SHA256</span>{' '}
+            sandbox session for any civic role to verify data ingestion, Recharts integrity trends,
+            heatmaps, and role-scoped briefings.
           </p>
 
           <div className="space-y-2.5 pt-1">
@@ -411,18 +538,30 @@ export const AuthStep: React.FC<AuthStepProps> = ({
               <button
                 key={r}
                 type="button"
-                onClick={() => handleInstantRoleAccess(r)}
-                className="w-full flex items-center justify-between gap-3 rounded-xl border border-[#16a34a]/25 bg-white px-4 py-3 text-left transition-colors hover:bg-[#dcfce7]/50"
+                disabled={loadingDemoRole !== null}
+                onClick={() => void handleEvaluatorSession(r)}
+                className="w-full flex items-center justify-between gap-3 rounded-xl border border-[#16a34a]/25 bg-white px-4 py-3 text-left transition-colors hover:bg-[#dcfce7]/50 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-[#16a34a]"
               >
                 <div>
                   <p className="text-xs font-bold text-[#131b2e]">
-                    Enter as {ROLE_META[r].label}
+                    {loadingDemoRole === r
+                      ? 'Issuing Signed Token...'
+                      : `Start ${ROLE_META[r].label} Session`}
                   </p>
                   <p className="text-[11px] text-slate-500">{ROLE_META[r].shortTitle}</p>
                 </div>
                 <ArrowRight className="h-4 w-4 text-[#15803d]" aria-hidden="true" />
               </button>
             ))}
+          </div>
+
+          <div className="rounded-xl border border-[#16a34a]/20 bg-white/80 p-3 text-[11px] text-[#3f493f] space-y-1">
+            <p className="font-semibold text-[#14532d]">Active Security Controls</p>
+            <ul className="list-disc pl-4 space-y-0.5">
+              <li>Server-enforced auth gate on all AI endpoints (<span className="font-mono">401</span> if unauthenticated)</li>
+              <li>5-attempt brute-force lockout + IP rate limiting</li>
+              <li><span className="font-mono">HttpOnly</span> cookie + <span className="font-mono">sessionStorage</span> signed token</li>
+            </ul>
           </div>
         </div>
       </div>
