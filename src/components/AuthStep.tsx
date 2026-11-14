@@ -196,12 +196,12 @@ export const AuthStep: React.FC<AuthStepProps> = ({
           >
             {isHi
               ? 'अपनी नागरिक भूमिका चुनें और सुरक्षित लॉगिन या पंजीकरण करें'
-              : 'Sign in or Register to Unlock Data Ingestion & Dashboards'}
+              : 'Optional Civic Role Sign-In & Registration'}
           </h1>
           <p className="mt-1 text-sm text-[#3f493f]">
             {isHi
-              ? 'लॉगिन के बाद डेटा अपलोड, स्वच्छता डैशबोर्ड, ब्रीफिंग और तुलना विकल्प खुलेंगे।'
-              : 'Protected by server-side salted scrypt hashing, HMAC-signed sessions, and brute-force lockout.'}
+              ? 'डेटा अपलोड और डैशबोर्ड पहले से खुले हैं। अपनी भूमिका सहेजने के लिए लॉगिन करें।'
+              : 'All data ingestion, dashboards, and briefings are open to test immediately—sign in anytime to bind a verified Ward Officer, RWA, or School profile.'}
           </p>
         </div>
 

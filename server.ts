@@ -118,6 +118,22 @@ function buildSourcePayload(sourceRows: SourceRow[]): string {
     .join('\n');
 }
 
+function compactReadingsForPrompt(readings: NormalizedReading[]) {
+  return readings.map((r) => ({
+    rowIndex: r.rowIndex,
+    timestampIso: r.timestampIso,
+    station: r.station,
+    pollutant: r.pollutant,
+    normalizedValue: r.normalizedValue,
+    normalizedUnit: r.normalizedUnit,
+    naqiSubIndex: r.naqiSubIndex,
+    naqiCategory: r.naqiCategory,
+    whoExceeded: r.whoExceeded,
+    status: r.status,
+    ...(r.issueNote ? { issueNote: r.issueNote } : {}),
+  }));
+}
+
 const ROLE_INSTRUCTIONS: Record<UserRole, string> = {
   ward_officer:
     'Ward Officer (Municipal Enforcement Authority): Can ONLY recommend actions within municipal ward powers such as construction & demolition (C&D) dust audits, mechanized road sweeping, water tankers/anti-smog guns, local commercial traffic diversion, idling checks, and open biomass/waste burning penalties. Do NOT suggest school closures or private society DG limits as direct orders.',
@@ -127,6 +143,7 @@ const ROLE_INSTRUCTIONS: Record<UserRole, string> = {
     'School Administration (Principal / Campus Safety): Can ONLY recommend campus-level actions such as moving morning assemblies indoors, suspending outdoor PT/sports, enforcing no-idling in school bus bays, closing cross-ventilation during peak plumes or running HEPA/air purifiers in classrooms, N95/KN95 masking, and asthma inhaler readiness. Do NOT suggest municipal road sweeping or industrial audits.',
 };
 
+export function createApp() {
 const app = express();
 app.disable('x-powered-by');
 app.set('trust proxy', 1);
@@ -312,7 +329,12 @@ app.post('/api/auth/logout', (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/normalize', requireAuth, aiLimiter, async (req, res) => {
+app.get('/api/auth/session-check', requireAuth, (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ ok: true, user: extractAuthUser(req) });
+});
+
+app.post('/api/normalize', aiLimiter, async (req, res) => {
   try {
     const { sourceRows, datasetTitle } = req.body as {
       sourceRows?: SourceRow[];
@@ -542,7 +564,7 @@ Rules:
   }
 });
 
-app.post('/api/brief', requireAuth, aiLimiter, async (req, res) => {
+app.post('/api/brief', aiLimiter, async (req, res) => {
   try {
     const { normalization, role, language, readingLevel } = req.body as {
       normalization?: NormalizationResult;
@@ -649,7 +671,7 @@ ${ROLE_INSTRUCTIONS[activeRole]}
         overallConfidence: normalization.overallConfidence,
         stationSummaries: normalization.stationSummaries,
         issues: normalization.issues,
-        readings: normalization.readings,
+        readings: compactReadingsForPrompt(normalization.readings),
       })}`,
       responseSchema,
       thinkingLevel: ThinkingLevel.MEDIUM,
@@ -685,7 +707,7 @@ ${ROLE_INSTRUCTIONS[activeRole]}
   }
 });
 
-app.post('/api/advisory', requireAuth, aiLimiter, async (req, res) => {
+app.post('/api/advisory', aiLimiter, async (req, res) => {
   try {
     const { normalization, internalBriefing, language, readingLevel } = req.body as {
       normalization?: NormalizationResult;
@@ -766,7 +788,7 @@ Include specific guidance for children, older adults, and respiratory-sensitive 
   }
 });
 
-app.post('/api/compare', requireAuth, aiLimiter, async (req, res) => {
+app.post('/api/compare', aiLimiter, async (req, res) => {
   try {
     const { currentNormalization, previousLabel, previousContent } = req.body as {
       currentNormalization?: NormalizationResult;
@@ -871,7 +893,7 @@ Rules:
         overallCategory: currentNormalization.overallCategory,
         stationSummaries: currentNormalization.stationSummaries,
         issues: currentNormalization.issues,
-        readings: currentNormalization.readings,
+        readings: compactReadingsForPrompt(currentNormalization.readings),
       })}`,
       responseSchema,
       thinkingLevel: ThinkingLevel.MEDIUM,
@@ -898,7 +920,7 @@ Rules:
   }
 });
 
-app.post('/api/brief-all-roles', requireAuth, aiLimiter, async (req, res) => {
+app.post('/api/brief-all-roles', aiLimiter, async (req, res) => {
   try {
     const { normalization } = req.body as {
       normalization?: NormalizationResult;
@@ -946,7 +968,7 @@ Every action item MUST cite valid rowIndex numbers from 1..${maxRow} and NEVER f
         overallCategory: normalization.overallCategory,
         stationSummaries: normalization.stationSummaries,
         issues: normalization.issues,
-        readings: normalization.readings,
+        readings: compactReadingsForPrompt(normalization.readings),
       }),
       responseSchema,
       thinkingLevel: ThinkingLevel.MEDIUM,
@@ -994,18 +1016,18 @@ app.post('/api/pawan', aiLimiter, async (req, res) => {
     const systemInstruction = `You are Pawan, the helpful civic air-quality guide and feature navigator inside Vayu AI.
 Your ONLY purpose is to:
 1. Clearly explain Vayu AI features (Messy Data Ingestion, Data Quality & Integrity Dashboards, Heatmaps, Pollutant Unit Converter, CPCB NAQI + WHO 2021 Thresholds, Row-Level Traceability, Role-Based Actions for Ward Officer / Housing Society / School, Multilingual English/Hindi & Simple/Standard Citizen Advisories, and What Changed Historical Compare).
-2. Route users to the right page and function by returning structured suggestedActions buttons.
-3. IMPORTANT AUTH RULE: If context.isAuthenticated is false, the user MUST sign in or register on the "auth" page before they can open "ingest", "hygiene", "briefs", or "compare". Guide them to "auth" first!
+2. Route users directly to the right page and function by returning structured suggestedActions buttons.
+3. Users can immediately open "ingest", "hygiene", "briefs", and "compare" without logging in first, or optionally visit "auth" to bind a saved Ward Officer, Housing Society, or School account.
 4. NEVER hallucinate or invent sensor readings, AQI values, or fake station statistics. Only cite numbers present in the user's current context if data is loaded.
 Keep answers concise (2–4 sentences), friendly, and practical. Respond in ${context?.currentLanguage === 'hi' ? 'Hindi or Hinglish/Hindi matching the user query' : 'the same language the user asks in (English or Hindi)'}.
 
 Available pages (targetPage):
 - "landing": Home overview with WHO/CPCB guidelines, Unit Converter tool, and Role cards
-- "auth": Role-based Login & Register page (Ward Officer, Housing Society, School)
-- "ingest": Upload CSV/Excel, paste messy raw tables, or click Load Messy Test Fixture (requires login)
-- "hygiene": Data Integrity Recharts monitor, Heatmaps, 5 Data-Quality graphs, Unit Converter, CPCB NAQI table (requires login)
-- "briefs": Dual-Output Briefing Studio & CSV Export (requires login)
-- "compare": Historical Comparison ("What Changed") (requires login)`;
+- "auth": Optional role-based Login & Register page (Ward Officer, Housing Society, School)
+- "ingest": Upload CSV/Excel, paste messy raw tables, or click Load Messy Test Fixture
+- "hygiene": Data Integrity Recharts monitor, Heatmaps, 5 Data-Quality graphs, Unit Converter, CPCB NAQI table
+- "briefs": Dual-Output Briefing Studio & CSV Export
+- "compare": Historical Comparison ("What Changed")`;
 
     const responseSchema = {
       type: Type.OBJECT,
@@ -1058,7 +1080,12 @@ Available pages (targetPage):
   }
 });
 
+    // Update guide prompt to reflect open ingestion + optional auth
+    return app;
+}
+
 async function startServer() {
+  const app = createApp();
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -1079,7 +1106,12 @@ async function startServer() {
   });
 }
 
-startServer().catch((err) => {
-  console.error('Failed to start server:', err);
-  process.exit(1);
-});
+const isMainModule =
+  Boolean(process.argv[1]) && path.resolve(process.argv[1]) === path.resolve(__filename);
+
+if (isMainModule) {
+  startServer().catch((err) => {
+    console.error('Failed to start server:', err);
+    process.exit(1);
+  });
+}

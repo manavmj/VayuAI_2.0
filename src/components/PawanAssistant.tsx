@@ -7,6 +7,7 @@ import type {
   PawanNavAction,
   WorkspaceStep,
 } from '../types/vayu.ts';
+import { apiFetch } from '../utils/authClient.ts';
 
 interface PawanAssistantProps {
   activeStep: WorkspaceStep;
@@ -18,7 +19,7 @@ interface PawanAssistantProps {
 }
 
 const STARTER_PROMPTS = [
-  'How do I sign in and upload data?',
+  'How do I upload CSV or messy data?',
   'Where are the Heatmaps & Unit Converter?',
   'Switch to Hindi Citizen Advisory',
   'How are Ward, Society, and School actions separated?',
@@ -40,15 +41,11 @@ export const PawanAssistant: React.FC<PawanAssistantProps> = ({
       id: 'pawan-welcome',
       sender: 'pawan',
       text: 'Namaste! I am Pawan, your Vayu AI guide. Ask me about WHO/CPCB guidelines, our Unit Converter, Heatmaps, Data Integrity charts, or role-based actions—and I will take you directly to the right page.',
-      actions: isAuthenticated
-        ? [
-            { label: 'Upload / Paste Data', targetPage: 'ingest' },
-            { label: 'Load Test Fixture & Audit', targetPage: 'ingest', loadFixture: true },
-          ]
-        : [
-            { label: 'Login / Register by Role', targetPage: 'auth' },
-            { label: 'View Guidelines & Converter', targetPage: 'landing' },
-          ],
+      actions: [
+        { label: 'Upload / Paste Data', targetPage: 'ingest' },
+        { label: 'Load Test Fixture & Audit', targetPage: 'ingest', loadFixture: true },
+        ...(isAuthenticated ? [] : [{ label: 'Optional Role Login', targetPage: 'auth' as const }]),
+      ],
     },
   ]);
 
@@ -74,9 +71,8 @@ export const PawanAssistant: React.FC<PawanAssistantProps> = ({
     setIsSending(true);
 
     try {
-      const response = await fetch('/api/pawan', {
+      const response = await apiFetch('/api/pawan', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: trimmed,
           context: {

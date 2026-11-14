@@ -101,7 +101,7 @@ const IntegrityTooltip: React.FC<{
   );
 };
 
-export const DataIntegrityDashboard: React.FC<DataIntegrityDashboardProps> = ({
+export const DataIntegrityDashboard: React.FC<DataIntegrityDashboardProps> = React.memo(({
   normalization,
   onInspectRows,
 }) => {
@@ -490,4 +490,4 @@ export const DataIntegrityDashboard: React.FC<DataIntegrityDashboardProps> = ({
       </div>
     </section>
   );
-};
+});

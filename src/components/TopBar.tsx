@@ -1,5 +1,5 @@
 import React from 'react';
-import { Languages, Leaf, LogOut, ZoomIn, ZoomOut } from 'lucide-react';
+import { Languages, Leaf, LogIn, LogOut, ZoomIn, ZoomOut } from 'lucide-react';
 import type { AdvisoryLanguage, AuthUser, WorkspaceStep } from '../types/vayu.ts';
 import { ROLE_META } from '../utils/naqi.ts';
 
@@ -7,6 +7,7 @@ interface TopBarProps {
   activeStep: WorkspaceStep;
   onSelectStep: (step: WorkspaceStep) => void;
   currentUser: AuthUser | null;
+  onOpenAuth: () => void;
   onLogout: () => void;
   hasNormalizedData: boolean;
   onPrimaryAction: () => void;
@@ -19,7 +20,7 @@ interface TopBarProps {
   datasetTitle?: string;
 }
 
-const AUTH_STEPS: { id: WorkspaceStep; labelEn: string; labelHi: string }[] = [
+const WORKSPACE_STEPS: { id: WorkspaceStep; labelEn: string; labelHi: string }[] = [
   { id: 'landing', labelEn: 'Home', labelHi: 'होम' },
   { id: 'ingest', labelEn: '01. Ingest', labelHi: '01. डेटा अपलोड' },
   { id: 'hygiene', labelEn: '02. Dashboards', labelHi: '02. डैशबोर्ड' },
@@ -31,6 +32,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   activeStep,
   onSelectStep,
   currentUser,
+  onOpenAuth,
   onLogout,
   hasNormalizedData,
   onPrimaryAction,
@@ -59,60 +61,31 @@ export const TopBar: React.FC<TopBarProps> = ({
             <span>Vayu AI</span>
           </button>
 
-          {/* Zone 2: Navigation — only show Ingest/Dashboards/Briefs/Compare AFTER login */}
-          {currentUser ? (
-            <nav aria-label="Workspace Steps" className="hidden lg:flex items-center gap-7">
-              {AUTH_STEPS.map((step) => {
-                const active = activeStep === step.id;
-                return (
-                  <button
-                    key={step.id}
-                    type="button"
-                    onClick={() => onSelectStep(step.id)}
-                    aria-current={active ? 'page' : undefined}
-                    className={`relative py-1 text-sm font-medium whitespace-nowrap shrink-0 transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#eab308] rounded ${
-                      active ? 'text-[#95f8a7] font-semibold' : 'text-white/80 hover:text-white'
-                    }`}
-                  >
-                    {isHi ? step.labelHi : step.labelEn}
-                    {active && (
-                      <span
-                        aria-hidden="true"
-                        className="absolute inset-x-0 -bottom-[15px] h-[2px] bg-[#eab308]"
-                      />
-                    )}
-                  </button>
-                );
-              })}
-            </nav>
-          ) : (
-            <nav aria-label="Public Navigation" className="hidden md:flex items-center gap-7">
-              <button
-                type="button"
-                onClick={() => onSelectStep('landing')}
-                aria-current={activeStep === 'landing' ? 'page' : undefined}
-                className={`relative py-1 text-sm font-medium whitespace-nowrap shrink-0 transition-colors ${
-                  activeStep === 'landing'
-                    ? 'text-[#95f8a7] font-semibold'
-                    : 'text-white/80 hover:text-white'
-                }`}
-              >
-                {isHi ? 'होम और दिशानिर्देश' : 'Home & Guidelines'}
-              </button>
-              <button
-                type="button"
-                onClick={() => onSelectStep('auth')}
-                aria-current={activeStep === 'auth' ? 'page' : undefined}
-                className={`relative py-1 text-sm font-medium whitespace-nowrap shrink-0 transition-colors ${
-                  activeStep === 'auth'
-                    ? 'text-[#95f8a7] font-semibold'
-                    : 'text-white/80 hover:text-white'
-                }`}
-              >
-                {isHi ? 'भूमिका लॉगिन / पंजीकरण' : 'Role Login / Register'}
-              </button>
-            </nav>
-          )}
+          {/* Zone 2: Full 5-Step Navigation always accessible */}
+          <nav aria-label="Workspace Steps" className="hidden lg:flex items-center gap-7">
+            {WORKSPACE_STEPS.map((step) => {
+              const active = activeStep === step.id;
+              return (
+                <button
+                  key={step.id}
+                  type="button"
+                  onClick={() => onSelectStep(step.id)}
+                  aria-current={active ? 'page' : undefined}
+                  className={`relative py-1 text-sm font-medium whitespace-nowrap shrink-0 transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-[#eab308] rounded ${
+                    active ? 'text-[#95f8a7] font-semibold' : 'text-white/80 hover:text-white'
+                  }`}
+                >
+                  {isHi ? step.labelHi : step.labelEn}
+                  {active && (
+                    <span
+                      aria-hidden="true"
+                      className="absolute inset-x-0 -bottom-[15px] h-[2px] bg-[#eab308]"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </nav>
 
           {/* Zone 3: Single primary contextual CTA */}
           <div className="shrink-0">
@@ -128,29 +101,27 @@ export const TopBar: React.FC<TopBarProps> = ({
         </div>
 
         {/* Mobile navigation row */}
-        {currentUser && (
-          <nav
-            aria-label="Mobile Workspace Steps"
-            className="flex lg:hidden items-center justify-between gap-2 border-t border-white/10 bg-[#142518] px-4 py-2 overflow-x-auto"
-          >
-            {AUTH_STEPS.map((step) => {
-              const active = activeStep === step.id;
-              return (
-                <button
-                  key={step.id}
-                  type="button"
-                  onClick={() => onSelectStep(step.id)}
-                  aria-current={active ? 'page' : undefined}
-                  className={`rounded-md px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 ${
-                    active ? 'bg-[#eab308] text-[#131b2e]' : 'text-white/85 hover:bg-white/10'
-                  }`}
-                >
-                  {isHi ? step.labelHi : step.labelEn}
-                </button>
-              );
-            })}
-          </nav>
-        )}
+        <nav
+          aria-label="Mobile Workspace Steps"
+          className="flex lg:hidden items-center justify-between gap-2 border-t border-white/10 bg-[#142518] px-4 py-2 overflow-x-auto"
+        >
+          {WORKSPACE_STEPS.map((step) => {
+            const active = activeStep === step.id;
+            return (
+              <button
+                key={step.id}
+                type="button"
+                onClick={() => onSelectStep(step.id)}
+                aria-current={active ? 'page' : undefined}
+                className={`rounded-md px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap shrink-0 ${
+                  active ? 'bg-[#eab308] text-[#131b2e]' : 'text-white/85 hover:bg-white/10'
+                }`}
+              >
+                {isHi ? step.labelHi : step.labelEn}
+              </button>
+            );
+          })}
+        </nav>
       </div>
 
       {/* Slim Global Accessibility, Session & Language Utility Bar */}
@@ -169,8 +140,8 @@ export const TopBar: React.FC<TopBarProps> = ({
                   {hasNormalizedData && datasetTitle
                     ? `${isHi ? 'डेटासेट:' : 'Dataset:'} ${datasetTitle}`
                     : isHi
-                      ? 'डेटा अपलोड करने के लिए तैयार'
-                      : 'Authenticated — ready for data ingestion'}
+                      ? 'सत्यापित भूमिका सत्र सक्रिय'
+                      : 'Verified civic role session active'}
                 </span>
                 <button
                   type="button"
@@ -182,11 +153,27 @@ export const TopBar: React.FC<TopBarProps> = ({
                 </button>
               </>
             ) : (
-              <span className="font-semibold">
-                {isHi
-                  ? 'डेटा अपलोड और डैशबोर्ड खोलने के लिए कृपया अपनी भूमिका से लॉगिन करें'
-                  : 'Sign in or register as a Ward Officer, Housing Society, or School to unlock ingestion & dashboards'}
-              </span>
+              <>
+                <span className="font-medium">
+                  {hasNormalizedData && datasetTitle
+                    ? `${isHi ? 'डेटासेट:' : 'Active Dataset:'} ${datasetTitle}`
+                    : isHi
+                      ? 'CSV/Excel अपलोड करने के लिए तैयार · वैकल्पिक भूमिका लॉगिन उपलब्ध'
+                      : 'Open testing enabled — upload CSV/Excel immediately or sign in for saved role profiles'}
+                </span>
+                <button
+                  type="button"
+                  onClick={onOpenAuth}
+                  className={`inline-flex items-center gap-1 rounded border px-2.5 py-0.5 text-[11px] font-semibold transition-colors ${
+                    activeStep === 'auth'
+                      ? 'border-[#15803d] bg-[#15803d] text-white'
+                      : 'border-[#16a34a]/30 bg-white text-[#15803d] hover:bg-[#dcfce7]'
+                  }`}
+                >
+                  <LogIn className="h-3 w-3" aria-hidden="true" />
+                  {isHi ? 'भूमिका लॉगिन / पंजीकरण' : 'Role Login / Register'}
+                </button>
+              </>
             )}
           </div>
 

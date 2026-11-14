@@ -21,7 +21,7 @@ function getHeatCellClasses(reading: NormalizedReading | undefined): string {
   return 'bg-[#fca5a5] text-[#7f1d1d] border-[#dc2626]';
 }
 
-export const HeatmapsPanel: React.FC<HeatmapsPanelProps> = ({
+export const HeatmapsPanel: React.FC<HeatmapsPanelProps> = React.memo(({
   normalization,
   onInspectRows,
 }) => {
@@ -276,4 +276,4 @@ export const HeatmapsPanel: React.FC<HeatmapsPanelProps> = ({
       </div>
     </section>
   );
-};
+});

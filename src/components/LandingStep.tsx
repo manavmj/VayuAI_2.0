@@ -10,7 +10,6 @@ import {
   LogIn,
   ShieldCheck,
   Sparkles,
-  UserPlus,
 } from 'lucide-react';
 import type { AdvisoryLanguage, AuthUser, UserRole } from '../types/vayu.ts';
 import { HERO_CANOPY_IMAGE, ROLE_CIVIC_IMAGES } from '../assets/civicImages.ts';
@@ -200,57 +199,45 @@ export const LandingStep: React.FC<LandingStepProps> = ({
               : 'Turn messy raw air-quality tables into verified Indian NAQI (CPCB) datasets, data-quality graphs, heatmaps, traceable findings, and role-scoped action briefings for Ward Officers, Housing Societies, and Schools—with zero fabricated numbers.'}
           </p>
 
-          {/* Hero CTAs: Strictly show Login / Register before authentication; Ingestion after login */}
-          {!currentUser ? (
-            <div className="flex flex-wrap items-center gap-4 pt-2">
+          {/* Hero CTAs: Immediate ingestion & fixture audit enabled; optional role login beside it */}
+          <div className="flex flex-wrap items-center gap-4 pt-2">
+            <button
+              type="button"
+              onClick={onStartIngest}
+              className="inline-flex items-center gap-2 rounded-lg bg-[#eab308] px-6 py-3 text-sm font-bold text-[#131b2e] shadow-lg transition-all hover:bg-[#facc15] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
+              {isHi ? 'डेटा अपलोड या पेस्ट करें' : 'Open Data Ingestion'}
+              <ArrowRight className="h-4 w-4" aria-hidden="true" />
+            </button>
+
+            <button
+              type="button"
+              disabled={isProcessingFixture}
+              onClick={onLoadFixtureAndAudit}
+              className="inline-flex items-center gap-2 rounded-lg border border-white/35 bg-white/15 backdrop-blur-md px-5 py-3 text-sm font-semibold text-white transition-all hover:bg-white/25 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+            >
+              <Sparkles className="h-4 w-4 text-[#95f8a7]" aria-hidden="true" />
+              {isProcessingFixture
+                ? isHi
+                  ? 'फ़िक्सचर प्रोसेस हो रहा है...'
+                  : 'Running GenAI Hygiene Audit...'
+                : isHi
+                  ? 'टेस्ट डेटा लोड करें और देखें'
+                  : 'Load Messy Test Fixture & Analyze'}
+            </button>
+
+            {!currentUser && (
               <button
                 type="button"
                 onClick={() => onOpenAuth('login', 'ward_officer')}
-                className="inline-flex items-center gap-2 rounded-lg bg-[#eab308] px-6 py-3 text-sm font-bold text-[#131b2e] shadow-lg transition-all hover:bg-[#facc15] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
+                className="inline-flex items-center gap-2 rounded-lg border border-white/25 bg-black/25 px-4 py-3 text-xs font-semibold text-white/95 transition-colors hover:bg-black/40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
               >
-                <LogIn className="h-4 w-4" aria-hidden="true" />
-                {isHi ? 'भूमिका के रूप में लॉगिन करें' : 'Login as Civic Role'}
-                <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                <LogIn className="h-4 w-4 text-[#95f8a7]" aria-hidden="true" />
+                {isHi ? 'भूमिका लॉगिन / पंजीकरण' : 'Role Login / Register'}
               </button>
-
-              <button
-                type="button"
-                onClick={() => onOpenAuth('register', 'ward_officer')}
-                className="inline-flex items-center gap-2 rounded-lg border border-white/35 bg-white/15 backdrop-blur-md px-5 py-3 text-sm font-semibold text-white transition-all hover:bg-white/25 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-              >
-                <UserPlus className="h-4 w-4 text-[#95f8a7]" aria-hidden="true" />
-                {isHi ? 'नया खाता पंजीकृत करें' : 'Register New Account'}
-              </button>
-            </div>
-          ) : (
-            <div className="flex flex-wrap items-center gap-4 pt-2">
-              <button
-                type="button"
-                onClick={onStartIngest}
-                className="inline-flex items-center gap-2 rounded-lg bg-[#eab308] px-6 py-3 text-sm font-bold text-[#131b2e] shadow-lg transition-all hover:bg-[#facc15] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-              >
-                <FileSpreadsheet className="h-4 w-4" aria-hidden="true" />
-                {isHi ? 'डेटा अपलोड या पेस्ट करें' : 'Open Data Ingestion'}
-                <ArrowRight className="h-4 w-4" aria-hidden="true" />
-              </button>
-
-              <button
-                type="button"
-                disabled={isProcessingFixture}
-                onClick={onLoadFixtureAndAudit}
-                className="inline-flex items-center gap-2 rounded-lg border border-white/35 bg-white/15 backdrop-blur-md px-5 py-3 text-sm font-semibold text-white transition-all hover:bg-white/25 disabled:opacity-60 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-white"
-              >
-                <Sparkles className="h-4 w-4 text-[#95f8a7]" aria-hidden="true" />
-                {isProcessingFixture
-                  ? isHi
-                    ? 'फ़िक्सचर प्रोसेस हो रहा है...'
-                    : 'Running GenAI Hygiene Audit...'
-                  : isHi
-                    ? 'टेस्ट डेटा लोड करें और देखें'
-                    : 'Load Messy Test Fixture & Analyze'}
-              </button>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </section>
 
@@ -454,25 +441,14 @@ export const LandingStep: React.FC<LandingStepProps> = ({
                   </ul>
                 </div>
 
-                {currentUser ? (
-                  <button
-                    type="button"
-                    onClick={() => onJumpToRole(card.role)}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#16a34a]/30 bg-[#f0fdf4] px-4 py-2.5 text-xs font-semibold text-[#15803d] transition-colors hover:bg-[#dcfce7] focus-visible:outline-2 focus-visible:outline-[#16a34a]"
-                  >
-                    {isHi ? `${card.titleHi} कार्य देखें` : `Open ${card.titleEn} Actions`}
-                    <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => onOpenAuth('login', card.role)}
-                    className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#16a34a]/30 bg-[#f0fdf4] px-4 py-2.5 text-xs font-semibold text-[#15803d] transition-colors hover:bg-[#dcfce7] focus-visible:outline-2 focus-visible:outline-[#16a34a]"
-                  >
-                    <LogIn className="h-3.5 w-3.5" aria-hidden="true" />
-                    {isHi ? `${card.titleHi} के रूप में लॉगिन` : `Login as ${card.titleEn}`}
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => onJumpToRole(card.role)}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#16a34a]/30 bg-[#f0fdf4] px-4 py-2.5 text-xs font-semibold text-[#15803d] transition-colors hover:bg-[#dcfce7] focus-visible:outline-2 focus-visible:outline-[#16a34a]"
+                >
+                  {isHi ? `${card.titleHi} कार्य देखें` : `Open ${card.titleEn} Actions`}
+                  <ArrowRight className="h-3.5 w-3.5" aria-hidden="true" />
+                </button>
               </div>
             </article>
           ))}

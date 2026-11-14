@@ -17,7 +17,7 @@ const WHO_THRESHOLDS: Record<string, { limit: number; unit: string }> = {
   O3: { limit: 100, unit: 'µg/m³' },
 };
 
-export const DataQualityCharts: React.FC<DataQualityChartsProps> = ({
+export const DataQualityCharts: React.FC<DataQualityChartsProps> = React.memo(({
   normalization,
   onInspectRows,
 }) => {
@@ -516,4 +516,4 @@ export const DataQualityCharts: React.FC<DataQualityChartsProps> = ({
       </div>
     </div>
   );
-};
+});

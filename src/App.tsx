@@ -1,37 +1,30 @@
-import { useCallback, useEffect, useState } from 'react';
+import React, { Suspense, useCallback, useState } from 'react';
 import { ExternalLink } from 'lucide-react';
-import type {
-  ActionItem,
-  AdvisoryLanguage,
-  AuthUser,
-  CitizenAdvisory,
-  ComparisonResult,
-  InternalBriefing,
-  NormalizationResult,
-  PawanNavAction,
-  ReadingLevel,
-  SavedBriefSnapshot,
-  SourceRow,
-  UserRole,
-  WorkspaceStep,
-} from './types/vayu.ts';
-import { deleteSavedBrief, loadSavedBriefs, saveBriefSnapshot } from './utils/naqi.ts';
-import {
-  apiFetch,
-  fetchCurrentSessionUser,
-  scrubLegacyInsecureStorage,
-  setSessionToken,
-} from './utils/authClient.ts';
-import { MESSY_TEST_FIXTURE, parseRawTextToSourceRows } from './utils/parser.ts';
+import type { AdvisoryLanguage, PawanNavAction, UserRole, WorkspaceStep } from './types/vayu.ts';
+import { useAuthSession } from './hooks/useAuthSession.ts';
+import { useBriefingStudio } from './hooks/useBriefingStudio.ts';
 import { TopBar } from './components/TopBar.tsx';
 import { LandingStep } from './components/LandingStep.tsx';
-import { AuthStep } from './components/AuthStep.tsx';
-import { IngestStep } from './components/IngestStep.tsx';
-import { HygieneStep } from './components/HygieneStep.tsx';
-import { BriefsStep } from './components/BriefsStep.tsx';
-import { CompareStep } from './components/CompareStep.tsx';
 import { CitationDrawer } from './components/CitationDrawer.tsx';
 import { PawanAssistant } from './components/PawanAssistant.tsx';
+import { ErrorBoundary } from './components/ErrorBoundary.tsx';
+
+// Code-split heavy workflow views (SheetJS, Recharts, Compare, Auth) for fast initial paint
+const AuthStep = React.lazy(() =>
+  import('./components/AuthStep.tsx').then((m) => ({ default: m.AuthStep }))
+);
+const IngestStep = React.lazy(() =>
+  import('./components/IngestStep.tsx').then((m) => ({ default: m.IngestStep }))
+);
+const HygieneStep = React.lazy(() =>
+  import('./components/HygieneStep.tsx').then((m) => ({ default: m.HygieneStep }))
+);
+const BriefsStep = React.lazy(() =>
+  import('./components/BriefsStep.tsx').then((m) => ({ default: m.BriefsStep }))
+);
+const CompareStep = React.lazy(() =>
+  import('./components/CompareStep.tsx').then((m) => ({ default: m.CompareStep }))
+);
 
 const ZOOM_CLASS_MAP: Record<number, string> = {
   85: '[zoom:0.85]',
@@ -42,458 +35,197 @@ const ZOOM_CLASS_MAP: Record<number, string> = {
   130: '[zoom:1.3]',
 };
 
+const StepLoadingFallback: React.FC = () => (
+  <div
+    aria-busy="true"
+    aria-label="Loading workspace view"
+    className="rounded-2xl border border-slate-200 bg-white p-10 space-y-4 animate-pulse"
+  >
+    <div className="h-5 w-44 rounded bg-[#f0fdf4]" />
+    <div className="h-8 w-80 rounded bg-slate-100" />
+    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-4">
+      <div className="h-28 rounded-xl bg-slate-100" />
+      <div className="h-28 rounded-xl bg-slate-100" />
+      <div className="h-28 rounded-xl bg-slate-100" />
+    </div>
+  </div>
+);
+
 export default function App() {
-  const [currentUser, setCurrentUser] = useState<AuthUser | null>(null);
-  const [sessionNotice, setSessionNotice] = useState<string | null>(null);
   const [activeStep, setActiveStep] = useState<WorkspaceStep>('landing');
   const [authInitialMode, setAuthInitialMode] = useState<'login' | 'register'>('login');
   const [authInitialRole, setAuthInitialRole] = useState<UserRole>('ward_officer');
   const [zoomPct, setZoomPct] = useState<number>(100);
-
-  // Step 1: Ingest state (strictly empty on load — no mock data)
-  const [datasetTitle, setDatasetTitle] = useState('');
-  const [rawInputText, setRawInputText] = useState('');
-  const [sourceRows, setSourceRows] = useState<SourceRow[]>([]);
-  const [detectedFormat, setDetectedFormat] = useState('empty');
-  const [truncatedCount, setTruncatedCount] = useState(0);
-
-  // Step 2: Hygiene & Normalization state
-  const [normalization, setNormalization] = useState<NormalizationResult | null>(null);
-  const [isNormalizing, setIsNormalizing] = useState(false);
-  const [apiError, setApiError] = useState<string | null>(null);
-
-  // Step 3: Briefs & Multilingual Advisory state
-  const [role, setRole] = useState<UserRole>(currentUser?.role || 'ward_officer');
-  const [language, setLanguage] = useState<AdvisoryLanguage>('en');
-  const [readingLevel, setReadingLevel] = useState<ReadingLevel>('standard');
-  const [internalBriefing, setInternalBriefing] = useState<InternalBriefing | null>(null);
-  const [citizenAdvisory, setCitizenAdvisory] = useState<CitizenAdvisory | null>(null);
-  const [allRolesMatrix, setAllRolesMatrix] = useState<Record<UserRole, ActionItem[]> | null>(null);
-  const [isLoadingAllRoles, setIsLoadingAllRoles] = useState(false);
-  const [isLoadingBrief, setIsLoadingBrief] = useState(false);
-  const [isUpdatingAdvisory, setIsUpdatingAdvisory] = useState(false);
-  const [isSnapshotSaved, setIsSnapshotSaved] = useState(false);
-
-  // Step 4: Compare state
-  const [savedSnapshots, setSavedSnapshots] = useState<SavedBriefSnapshot[]>([]);
-  const [comparisonResult, setComparisonResult] = useState<ComparisonResult | null>(null);
-  const [isComparing, setIsComparing] = useState(false);
-  const [compareError, setCompareError] = useState<string | null>(null);
-
-  // Traceability Inspector Drawer
   const [inspectedRows, setInspectedRows] = useState<number[] | null>(null);
   const [inspectedTitle, setInspectedTitle] = useState<string | undefined>(undefined);
 
-  useEffect(() => {
-    setSavedSnapshots(loadSavedBriefs());
-    scrubLegacyInsecureStorage();
-    void fetchCurrentSessionUser().then((verifiedUser) => {
-      if (verifiedUser) {
-        setCurrentUser(verifiedUser);
-        setRole(verifiedUser.role);
-      }
-    });
-  }, []);
+  const studio = useBriefingStudio('ward_officer');
+  const { setRole } = studio;
 
-  const handleSessionExpired = useCallback((message?: string) => {
-    setSessionToken(null);
-    setCurrentUser(null);
-    setSessionNotice(
-      message || 'Your session expired or could not be verified. Please sign in again.'
-    );
-    setActiveStep('auth');
-  }, []);
+  const syncUserRole = useCallback(
+    (userRole: UserRole) => {
+      setRole(userRole);
+    },
+    [setRole]
+  );
 
-  const handleOpenAuth = (mode: 'login' | 'register', targetRole: UserRole = 'ward_officer') => {
-    setSessionNotice(null);
-    setAuthInitialMode(mode);
-    setAuthInitialRole(targetRole);
-    setActiveStep('auth');
-  };
+  const auth = useAuthSession(syncUserRole);
 
-  const handleAuthenticated = (user: AuthUser) => {
-    setSessionNotice(null);
-    setCurrentUser(user);
-    setRole(user.role);
-    setActiveStep('ingest');
-  };
-
-  const handleLogout = () => {
-    setSessionToken(null);
-    setCurrentUser(null);
-    setActiveStep('landing');
-    void apiFetch('/api/auth/logout', { method: 'POST' });
-  };
-
-  const navigateSafely = (step: WorkspaceStep) => {
-    if (!currentUser && step !== 'landing' && step !== 'auth') {
+  const handleOpenAuth = useCallback(
+    (mode: 'login' | 'register' = 'login', targetRole: UserRole = 'ward_officer') => {
+      auth.clearSessionNotice();
+      setAuthInitialMode(mode);
+      setAuthInitialRole(targetRole);
       setActiveStep('auth');
-      return;
-    }
-    setActiveStep(step);
-  };
-
-  const handleUpdateParsedInput = (payload: {
-    rawText: string;
-    rows: SourceRow[];
-    detectedFormat: string;
-    truncatedCount: number;
-    suggestedTitle?: string;
-  }) => {
-    setRawInputText(payload.rawText);
-    setSourceRows(payload.rows);
-    setDetectedFormat(payload.detectedFormat);
-    setTruncatedCount(payload.truncatedCount);
-    if (payload.suggestedTitle !== undefined) {
-      setDatasetTitle(payload.suggestedTitle);
-    }
-    setApiError(null);
-    setNormalization(null);
-    setInternalBriefing(null);
-    setCitizenAdvisory(null);
-    setAllRolesMatrix(null);
-    setComparisonResult(null);
-    setIsSnapshotSaved(false);
-  };
-
-  const runNormalizationForRows = useCallback(
-    async (rowsToUse: SourceRow[], titleToUse: string) => {
-      if (rowsToUse.length === 0) return;
-      setIsNormalizing(true);
-      setApiError(null);
-
-      try {
-        const response = await apiFetch('/api/normalize', {
-          method: 'POST',
-          body: JSON.stringify({
-            sourceRows: rowsToUse,
-            datasetTitle: titleToUse.trim() || undefined,
-          }),
-        });
-        const data = await response.json();
-        if (response.status === 401) {
-          handleSessionExpired(data.error);
-          return;
-        }
-        if (!response.ok) {
-          throw new Error(data.error || 'Normalization failed.');
-        }
-
-        setNormalization(data as NormalizationResult);
-        setInternalBriefing(null);
-        setCitizenAdvisory(null);
-        setAllRolesMatrix(null);
-        setComparisonResult(null);
-        setIsSnapshotSaved(false);
-        setActiveStep('hygiene');
-      } catch (err) {
-        setApiError(err instanceof Error ? err.message : 'Unable to normalize dataset.');
-      } finally {
-        setIsNormalizing(false);
-      }
     },
-    [handleSessionExpired]
+    [auth]
   );
 
-  const handleNormalize = () => {
-    void runNormalizationForRows(sourceRows, datasetTitle);
-  };
-
-  const handleLoadFixtureAndAudit = async () => {
-    if (!currentUser) {
-      handleOpenAuth('login', 'ward_officer');
-      return;
+  const handleNormalize = useCallback(async () => {
+    const normalized = await studio.runNormalizationForRows(studio.sourceRows, studio.datasetTitle);
+    if (normalized) {
+      setActiveStep('hygiene');
     }
-    const parsed = parseRawTextToSourceRows(MESSY_TEST_FIXTURE);
-    const title = 'Delhi Multi-Ward Morning Log (Messy Fixture)';
-    handleUpdateParsedInput({
-      rawText: MESSY_TEST_FIXTURE,
-      rows: parsed.rows,
-      detectedFormat: parsed.detectedFormat,
-      truncatedCount: parsed.truncatedCount,
-      suggestedTitle: title,
-    });
-    await runNormalizationForRows(parsed.rows, title);
-  };
+  }, [studio]);
 
-  const generateBriefs = useCallback(
-    async (
-      targetNorm: NormalizationResult,
-      targetRole: UserRole,
-      targetLang: AdvisoryLanguage,
-      targetLevel: ReadingLevel
-    ) => {
-      setIsLoadingBrief(true);
-      setApiError(null);
-      try {
-        const response = await apiFetch('/api/brief', {
-          method: 'POST',
-          body: JSON.stringify({
-            normalization: targetNorm,
-            role: targetRole,
-            language: targetLang,
-            readingLevel: targetLevel,
-          }),
-        });
-        const data = await response.json();
-        if (response.status === 401) {
-          handleSessionExpired(data.error);
-          return;
-        }
-        if (!response.ok) {
-          throw new Error(data.error || 'Failed to generate briefings.');
-        }
-
-        setInternalBriefing(data.internalBriefing as InternalBriefing);
-        setCitizenAdvisory(data.citizenAdvisory as CitizenAdvisory);
-        setIsSnapshotSaved(false);
-      } catch (err) {
-        setApiError(err instanceof Error ? err.message : 'Unable to generate briefings.');
-      } finally {
-        setIsLoadingBrief(false);
-      }
-    },
-    [handleSessionExpired]
-  );
-
-  const handleGenerateAllRoles = async () => {
-    if (!normalization) return;
-    setIsLoadingAllRoles(true);
-    setApiError(null);
-    try {
-      const response = await apiFetch('/api/brief-all-roles', {
-        method: 'POST',
-        body: JSON.stringify({ normalization }),
-      });
-      const data = await response.json();
-      if (response.status === 401) {
-        handleSessionExpired(data.error);
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to build 3-role matrix.');
-      }
-      setAllRolesMatrix(data as Record<UserRole, ActionItem[]>);
-    } catch (err) {
-      setApiError(err instanceof Error ? err.message : 'Unable to generate 3-role matrix.');
-    } finally {
-      setIsLoadingAllRoles(false);
+  const handleLoadFixtureAndAudit = useCallback(async () => {
+    const normalized = await studio.loadFixtureAndNormalize();
+    if (normalized) {
+      setActiveStep('hygiene');
     }
-  };
+  }, [studio]);
 
-  const handleProceedToBriefs = async () => {
-    if (!currentUser) {
-      handleOpenAuth('login', role);
-      return;
-    }
-    if (!normalization) {
-      setActiveStep('briefs');
-      return;
-    }
+  const handleProceedToBriefs = useCallback(async () => {
     setActiveStep('briefs');
-    if (!internalBriefing || !citizenAdvisory) {
-      await generateBriefs(normalization, role, language, readingLevel);
+    if (studio.normalization && (!studio.internalBriefing || !studio.citizenAdvisory)) {
+      await studio.generateBriefs(
+        studio.normalization,
+        studio.role,
+        studio.language,
+        studio.readingLevel
+      );
     }
-  };
+  }, [studio]);
 
-  const handleChangeRole = async (nextRole: UserRole) => {
-    setRole(nextRole);
-    if (!normalization) return;
-    await generateBriefs(normalization, nextRole, language, readingLevel);
-  };
+  const handleChangeRole = useCallback(
+    async (nextRole: UserRole) => {
+      studio.setRole(nextRole);
+      if (!studio.normalization) return;
+      await studio.generateBriefs(
+        studio.normalization,
+        nextRole,
+        studio.language,
+        studio.readingLevel
+      );
+    },
+    [studio]
+  );
 
-  const handleUpdateAdvisorySettings = async (
-    nextLang: AdvisoryLanguage,
-    nextLevel: ReadingLevel
-  ) => {
-    setLanguage(nextLang);
-    setReadingLevel(nextLevel);
-    if (!normalization) return;
-
-    setIsUpdatingAdvisory(true);
-    setApiError(null);
-    try {
-      const response = await apiFetch('/api/advisory', {
-        method: 'POST',
-        body: JSON.stringify({
-          normalization,
-          internalBriefing,
-          language: nextLang,
-          readingLevel: nextLevel,
-        }),
-      });
-      const data = await response.json();
-      if (response.status === 401) {
-        handleSessionExpired(data.error);
-        return;
+  const handleGlobalLanguageChange = useCallback(
+    (nextLang: AdvisoryLanguage) => {
+      if (studio.normalization && studio.citizenAdvisory) {
+        void studio.updateAdvisorySettings(nextLang, studio.readingLevel);
+      } else {
+        studio.setLanguage(nextLang);
       }
-      if (!response.ok) {
-        throw new Error(data.error || 'Failed to update Citizen Advisory.');
-      }
-      setCitizenAdvisory(data as CitizenAdvisory);
-      setIsSnapshotSaved(false);
-    } catch (err) {
-      setApiError(err instanceof Error ? err.message : 'Unable to update Citizen Advisory.');
-    } finally {
-      setIsUpdatingAdvisory(false);
-    }
-  };
+    },
+    [studio]
+  );
 
-  const handleGlobalLanguageChange = (nextLang: AdvisoryLanguage) => {
-    if (normalization && citizenAdvisory) {
-      void handleUpdateAdvisorySettings(nextLang, readingLevel);
-    } else {
-      setLanguage(nextLang);
-    }
-  };
-
-  const handleSaveSnapshot = () => {
-    if (!normalization || !internalBriefing || !citizenAdvisory) return;
-    const snapshot: SavedBriefSnapshot = {
-      id: `vayu-${Date.now()}`,
-      savedAt: new Date().toISOString(),
-      label: `${normalization.datasetTitle} (${role.replace('_', ' ')})`,
-      sourceRows,
-      normalization,
-      role,
-      internalBriefing,
-      citizenAdvisory,
-    };
-    const updated = saveBriefSnapshot(snapshot);
-    setSavedSnapshots(updated);
-    setIsSnapshotSaved(true);
-  };
-
-  const handleDeleteSnapshot = (id: string) => {
-    const updated = deleteSavedBrief(id);
-    setSavedSnapshots(updated);
-  };
-
-  const handleRunComparison = async (previousLabel: string, previousContent: string) => {
-    if (!normalization) return;
-    setIsComparing(true);
-    setCompareError(null);
-    try {
-      const response = await apiFetch('/api/compare', {
-        method: 'POST',
-        body: JSON.stringify({
-          currentNormalization: normalization,
-          previousLabel,
-          previousContent,
-        }),
-      });
-      const data = await response.json();
-      if (response.status === 401) {
-        handleSessionExpired(data.error);
-        return;
-      }
-      if (!response.ok) {
-        throw new Error(data.error || 'Comparison failed.');
-      }
-      setComparisonResult(data as ComparisonResult);
-    } catch (err) {
-      setCompareError(err instanceof Error ? err.message : 'Unable to compare baselines.');
-    } finally {
-      setIsComparing(false);
-    }
-  };
-
-  const handleInspectRows = (rows: number[], title?: string) => {
+  const handleInspectRows = useCallback((rows: number[], title?: string) => {
     setInspectedRows(rows);
     setInspectedTitle(title);
-  };
+  }, []);
 
-  const handleJumpToRoleFromLanding = async (targetRole: UserRole) => {
-    if (!currentUser) {
-      handleOpenAuth('login', targetRole);
-      return;
-    }
-    setRole(targetRole);
-    if (normalization) {
-      setActiveStep('briefs');
-      await generateBriefs(normalization, targetRole, language, readingLevel);
-    } else {
-      setActiveStep('ingest');
-    }
-  };
-
-  const handlePawanNavAction = async (action: PawanNavAction) => {
-    if (action.targetLanguage) {
-      handleGlobalLanguageChange(action.targetLanguage);
-    }
-    if (action.targetRole) {
-      setRole(action.targetRole);
-    }
-    if (!currentUser && action.targetPage !== 'landing' && action.targetPage !== 'auth') {
-      handleOpenAuth('login', action.targetRole || 'ward_officer');
-      return;
-    }
-    if (action.loadFixture && currentUser) {
-      await handleLoadFixtureAndAudit();
-      if (action.targetPage && action.targetPage !== 'ingest' && action.targetPage !== 'hygiene') {
-        setActiveStep(action.targetPage);
+  const handleJumpToRoleFromLanding = useCallback(
+    async (targetRole: UserRole) => {
+      studio.setRole(targetRole);
+      if (studio.normalization) {
+        setActiveStep('briefs');
+        await studio.generateBriefs(
+          studio.normalization,
+          targetRole,
+          studio.language,
+          studio.readingLevel
+        );
+      } else {
+        setActiveStep('ingest');
       }
-      return;
-    }
+    },
+    [studio]
+  );
 
-    if (action.targetPage === 'briefs' && normalization && currentUser) {
-      setActiveStep('briefs');
-      await generateBriefs(
-        normalization,
-        action.targetRole || role,
-        action.targetLanguage || language,
-        readingLevel
-      );
-      return;
-    }
+  const handlePawanNavAction = useCallback(
+    async (action: PawanNavAction) => {
+      if (action.targetLanguage) {
+        handleGlobalLanguageChange(action.targetLanguage);
+      }
+      if (action.targetRole) {
+        studio.setRole(action.targetRole);
+      }
+      if (action.loadFixture) {
+        const normalized = await studio.loadFixtureAndNormalize();
+        if (normalized) {
+          setActiveStep(
+            action.targetPage && action.targetPage !== 'ingest' ? action.targetPage : 'hygiene'
+          );
+        }
+        return;
+      }
 
-    navigateSafely(action.targetPage);
-  };
+      if (action.targetPage === 'briefs' && studio.normalization) {
+        setActiveStep('briefs');
+        await studio.generateBriefs(
+          studio.normalization,
+          action.targetRole || studio.role,
+          action.targetLanguage || studio.language,
+          studio.readingLevel
+        );
+        return;
+      }
+
+      setActiveStep(action.targetPage);
+    },
+    [handleGlobalLanguageChange, studio]
+  );
 
   const getPrimaryHeaderAction = (): {
     label: string;
     disabled: boolean;
     onClick: () => void;
   } => {
-    if (!currentUser) {
+    if (activeStep === 'landing' || activeStep === 'auth') {
       return {
-        label: language === 'hi' ? 'लॉगिन / पंजीकरण' : 'Login / Register',
+        label: studio.language === 'hi' ? 'डेटा अपलोड करें' : 'Upload Air Data',
         disabled: false,
-        onClick: () => handleOpenAuth('login', 'ward_officer'),
-      };
-    }
-    if (activeStep === 'landing') {
-      return {
-        label: language === 'hi' ? 'डेटा अपलोड करें' : 'Upload Air Data',
-        disabled: false,
-        onClick: () => navigateSafely('ingest'),
+        onClick: () => setActiveStep('ingest'),
       };
     }
     if (activeStep === 'ingest') {
       return {
-        label: isNormalizing ? 'Normalizing...' : 'Run Hygiene Audit',
-        disabled: sourceRows.length === 0 || isNormalizing,
-        onClick: handleNormalize,
+        label: studio.isNormalizing ? 'Normalizing...' : 'Run Hygiene Audit',
+        disabled: studio.sourceRows.length === 0 || studio.isNormalizing,
+        onClick: () => void handleNormalize(),
       };
     }
     if (activeStep === 'hygiene') {
       return {
-        label: isLoadingBrief ? 'Generating Briefs...' : 'Generate Briefs',
-        disabled: !normalization || isLoadingBrief,
-        onClick: handleProceedToBriefs,
+        label: studio.isLoadingBrief ? 'Generating Briefs...' : 'Generate Briefs',
+        disabled: !studio.normalization || studio.isLoadingBrief,
+        onClick: () => void handleProceedToBriefs(),
       };
     }
     if (activeStep === 'briefs') {
       return {
         label: 'Compare Changes',
-        disabled: !normalization,
-        onClick: () => navigateSafely('compare'),
+        disabled: !studio.normalization,
+        onClick: () => setActiveStep('compare'),
       };
     }
     return {
       label: 'New Dataset',
       disabled: false,
-      onClick: () => navigateSafely('ingest'),
+      onClick: () => setActiveStep('ingest'),
     };
   };
 
@@ -505,120 +237,134 @@ export default function App() {
       <TopBar
         activeStep={activeStep}
         onSelectStep={(step) => {
-          if (step === 'briefs' && normalization && (!internalBriefing || !citizenAdvisory)) {
+          if (
+            step === 'briefs' &&
+            studio.normalization &&
+            (!studio.internalBriefing || !studio.citizenAdvisory)
+          ) {
             void handleProceedToBriefs();
           } else {
-            navigateSafely(step);
+            setActiveStep(step);
           }
         }}
-        currentUser={currentUser}
-        onLogout={handleLogout}
-        hasNormalizedData={Boolean(normalization)}
+        currentUser={auth.currentUser}
+        onOpenAuth={() => handleOpenAuth('login', studio.role)}
+        onLogout={auth.handleLogout}
+        hasNormalizedData={Boolean(studio.normalization)}
         onPrimaryAction={headerAction.onClick}
         primaryActionLabel={headerAction.label}
         primaryActionDisabled={headerAction.disabled}
-        language={language}
+        language={studio.language}
         onChangeLanguage={handleGlobalLanguageChange}
         zoomPct={zoomPct}
         onChangeZoom={setZoomPct}
-        datasetTitle={normalization?.datasetTitle}
+        datasetTitle={studio.normalization?.datasetTitle}
       />
 
       <main className={`mx-auto w-full max-w-[1360px] flex-1 px-4 py-8 sm:px-8 ${zoomClass}`}>
-        {apiError && activeStep !== 'ingest' && (
+        {studio.apiError && activeStep !== 'ingest' && (
           <div
             role="alert"
             className="mb-6 rounded-xl border border-[#ba1a1a]/30 bg-[#ffdad6]/50 px-4 py-3 text-sm text-[#93000a]"
           >
             <span className="font-semibold">Action Error: </span>
-            {apiError}
+            {studio.apiError}
           </div>
         )}
 
-        {activeStep === 'landing' && (
-          <LandingStep
-            language={language}
-            currentUser={currentUser}
-            onOpenAuth={handleOpenAuth}
-            onStartIngest={() => navigateSafely('ingest')}
-            onLoadFixtureAndAudit={handleLoadFixtureAndAudit}
-            onJumpToRole={handleJumpToRoleFromLanding}
-            isProcessingFixture={isNormalizing}
-          />
-        )}
+        <ErrorBoundary fallbackTitle="Workspace view encountered a rendering error">
+          <Suspense fallback={<StepLoadingFallback />}>
+            {activeStep === 'landing' && (
+              <LandingStep
+                language={studio.language}
+                currentUser={auth.currentUser}
+                onOpenAuth={handleOpenAuth}
+                onStartIngest={() => setActiveStep('ingest')}
+                onLoadFixtureAndAudit={() => void handleLoadFixtureAndAudit()}
+                onJumpToRole={(r) => void handleJumpToRoleFromLanding(r)}
+                isProcessingFixture={studio.isNormalizing}
+              />
+            )}
 
-        {activeStep === 'auth' && (
-          <AuthStep
-            initialMode={authInitialMode}
-            initialRole={authInitialRole}
-            language={language}
-            sessionNotice={sessionNotice}
-            onAuthenticated={handleAuthenticated}
-            onBackHome={() => setActiveStep('landing')}
-          />
-        )}
+            {activeStep === 'auth' && (
+              <AuthStep
+                initialMode={authInitialMode}
+                initialRole={authInitialRole}
+                language={studio.language}
+                sessionNotice={auth.sessionNotice}
+                onAuthenticated={(user) => {
+                  auth.handleAuthenticated(user);
+                  setActiveStep('ingest');
+                }}
+                onBackHome={() => setActiveStep('landing')}
+              />
+            )}
 
-        {currentUser && activeStep === 'ingest' && (
-          <IngestStep
-            datasetTitle={datasetTitle}
-            onChangeTitle={setDatasetTitle}
-            rawInputText={rawInputText}
-            sourceRows={sourceRows}
-            detectedFormat={detectedFormat}
-            truncatedCount={truncatedCount}
-            onUpdateParsedInput={handleUpdateParsedInput}
-            onNormalize={handleNormalize}
-            isNormalizing={isNormalizing}
-            errorMessage={apiError}
-          />
-        )}
+            {activeStep === 'ingest' && (
+              <IngestStep
+                datasetTitle={studio.datasetTitle}
+                onChangeTitle={studio.setDatasetTitle}
+                rawInputText={studio.rawInputText}
+                sourceRows={studio.sourceRows}
+                detectedFormat={studio.detectedFormat}
+                truncatedCount={studio.truncatedCount}
+                onUpdateParsedInput={studio.updateParsedInput}
+                onNormalize={() => void handleNormalize()}
+                isNormalizing={studio.isNormalizing}
+                errorMessage={studio.apiError}
+              />
+            )}
 
-        {currentUser && activeStep === 'hygiene' && (
-          <HygieneStep
-            normalization={normalization}
-            onInspectRows={handleInspectRows}
-            onProceedToBriefs={handleProceedToBriefs}
-            onGoToIngest={() => navigateSafely('ingest')}
-            isGeneratingBriefs={isLoadingBrief}
-          />
-        )}
+            {activeStep === 'hygiene' && (
+              <HygieneStep
+                normalization={studio.normalization}
+                onInspectRows={handleInspectRows}
+                onProceedToBriefs={() => void handleProceedToBriefs()}
+                onGoToIngest={() => setActiveStep('ingest')}
+                isGeneratingBriefs={studio.isLoadingBrief}
+              />
+            )}
 
-        {currentUser && activeStep === 'briefs' && (
-          <BriefsStep
-            normalization={normalization}
-            role={role}
-            onChangeRole={handleChangeRole}
-            internalBriefing={internalBriefing}
-            citizenAdvisory={citizenAdvisory}
-            allRolesMatrix={allRolesMatrix}
-            isLoadingAllRoles={isLoadingAllRoles}
-            onGenerateAllRoles={handleGenerateAllRoles}
-            language={language}
-            readingLevel={readingLevel}
-            onUpdateAdvisorySettings={handleUpdateAdvisorySettings}
-            isLoadingBrief={isLoadingBrief}
-            isUpdatingAdvisory={isUpdatingAdvisory}
-            onInspectRows={handleInspectRows}
-            onSaveSnapshot={handleSaveSnapshot}
-            isSnapshotSaved={isSnapshotSaved}
-            onProceedToCompare={() => navigateSafely('compare')}
-            onGoToIngest={() => navigateSafely('ingest')}
-          />
-        )}
+            {activeStep === 'briefs' && (
+              <BriefsStep
+                normalization={studio.normalization}
+                role={studio.role}
+                onChangeRole={(r) => void handleChangeRole(r)}
+                internalBriefing={studio.internalBriefing}
+                citizenAdvisory={studio.citizenAdvisory}
+                allRolesMatrix={studio.allRolesMatrix}
+                isLoadingAllRoles={studio.isLoadingAllRoles}
+                onGenerateAllRoles={() => void studio.generateAllRoles()}
+                language={studio.language}
+                readingLevel={studio.readingLevel}
+                onUpdateAdvisorySettings={(lang, level) =>
+                  void studio.updateAdvisorySettings(lang, level)
+                }
+                isLoadingBrief={studio.isLoadingBrief}
+                isUpdatingAdvisory={studio.isUpdatingAdvisory}
+                onInspectRows={handleInspectRows}
+                onSaveSnapshot={studio.saveSnapshot}
+                isSnapshotSaved={studio.isSnapshotSaved}
+                onProceedToCompare={() => setActiveStep('compare')}
+                onGoToIngest={() => setActiveStep('ingest')}
+              />
+            )}
 
-        {currentUser && activeStep === 'compare' && (
-          <CompareStep
-            currentNormalization={normalization}
-            savedSnapshots={savedSnapshots}
-            onDeleteSnapshot={handleDeleteSnapshot}
-            onRunComparison={handleRunComparison}
-            comparisonResult={comparisonResult}
-            isComparing={isComparing}
-            compareError={compareError}
-            onInspectRows={handleInspectRows}
-            onGoToIngest={() => navigateSafely('ingest')}
-          />
-        )}
+            {activeStep === 'compare' && (
+              <CompareStep
+                currentNormalization={studio.normalization}
+                savedSnapshots={studio.savedSnapshots}
+                onDeleteSnapshot={studio.removeSnapshot}
+                onRunComparison={studio.runComparison}
+                comparisonResult={studio.comparisonResult}
+                isComparing={studio.isComparing}
+                compareError={studio.compareError}
+                onInspectRows={handleInspectRows}
+                onGoToIngest={() => setActiveStep('ingest')}
+              />
+            )}
+          </Suspense>
+        </ErrorBoundary>
       </main>
 
       {/* Footer with Explicit WHO 2021 Guidelines & CPCB Reference Links */}
@@ -627,7 +373,7 @@ export default function App() {
           <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 rounded-xl border border-[#16a34a]/20 bg-[#f0fdf4]/70 px-5 py-4">
             <div className="space-y-1">
               <p className="text-xs font-semibold uppercase tracking-[0.04em] text-[#00652c]">
-                {language === 'hi'
+                {studio.language === 'hi'
                   ? 'आधिकारिक वायु गुणवत्ता मानक संदर्भ'
                   : 'Official Regulatory & Public Health Benchmarks'}
               </p>
@@ -666,18 +412,18 @@ export default function App() {
 
       <CitationDrawer
         selectedRowIndices={inspectedRows}
-        sourceRows={sourceRows}
-        readings={normalization?.readings || []}
+        sourceRows={studio.sourceRows}
+        readings={studio.normalization?.readings || []}
         contextTitle={inspectedTitle}
         onClose={() => setInspectedRows(null)}
       />
 
       <PawanAssistant
         activeStep={activeStep}
-        isAuthenticated={Boolean(currentUser)}
-        hasData={sourceRows.length > 0}
-        normalization={normalization}
-        language={language}
+        isAuthenticated={Boolean(auth.currentUser)}
+        hasData={studio.sourceRows.length > 0}
+        normalization={studio.normalization}
+        language={studio.language}
         onExecuteNavAction={(action) => void handlePawanNavAction(action)}
       />
     </div>

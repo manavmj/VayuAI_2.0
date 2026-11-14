@@ -1,4 +1,3 @@
-import * as XLSX from 'xlsx';
 import type { SourceRow } from '../types/vayu.ts';
 
 const MAX_ROWS = 150;
@@ -162,6 +161,7 @@ export async function parseFileToSourceRows(file: File): Promise<{
   }
 
   const buffer = await file.arrayBuffer();
+  const XLSX = await import('xlsx');
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: false });
   const firstSheetName = workbook.SheetNames[0];
   if (!firstSheetName) {
