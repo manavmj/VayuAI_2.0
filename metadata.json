@@ -1,0 +1,6 @@
+{
+  "name": "Vayu AI",
+  "description": "Civic air-quality data hygiene, Indian NAQI normalization, row-level traceability, and bilingual public briefing studio.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
